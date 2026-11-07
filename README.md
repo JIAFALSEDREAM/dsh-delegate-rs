@@ -2,6 +2,10 @@
 
 简体中文 | [English](README.en.md)
 
+[![npm version](https://img.shields.io/npm/v/dsh-delegate-rs?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-delegate-rs)
+[![crates.io version](https://img.shields.io/crates/v/dsh-delegate-rs?style=flat-square&logo=rust)](https://crates.io/crates/dsh-delegate-rs)
+[![GitHub release](https://img.shields.io/github/v/release/JIAFALSEDREAM/dsh-delegate-rs?style=flat-square&logo=github)](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases/latest)
+[![CI status](https://img.shields.io/github/actions/workflow/status/JIAFALSEDREAM/dsh-delegate-rs/ci.yml?branch=main&style=flat-square&logo=githubactions&label=CI)](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange?style=flat-square&logo=rust)](INSTALL.md#前提)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -22,17 +26,17 @@
 
 依赖安装方法见[安装指南](INSTALL.md#前提)。本工具的安装包不会安装 dsh 或 Codex CLI。
 
-### 2. 从本地源码安装
+### 2. 安装并接入 Codex
 
 ```sh
-cargo install --path . --locked
+npm install -g dsh-delegate-rs
 dsh-delegate-rs init
-dsh-delegate-rs doctor
+dsh-delegate-rs install
 ```
 
-在本仓库根目录执行。先按下文配置 API 环境，再运行 `doctor`。以上步骤不会注册 MCP；只有用户显式执行 `install` 或 `register` 才修改 Codex 配置，详见[注册说明](INSTALL.md#注册-codex-mcp)。
+npm 自动选择当前平台的二进制，无需 Rust。`init` 创建配置后，先按下文设置模型和认证，再执行 `install`。安装助手会检查依赖和沙箱、注册 MCP 并写入受管理的 AGENTS 策略；成功后新开 Codex 会话，即可使用 `dsh_submit` 等工具。只检查运行环境可执行 `doctor`，不注册 MCP。
 
-发布包的版本与可用平台以对应发行渠道为准；源码构建方式适用于本仓库。
+也可从 [GitHub Releases](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases) 下载预编译包，或使用 `cargo install dsh-delegate-rs --locked`。发布流程覆盖 Linux、macOS、Windows 的 x86_64 与 ARM64；实际验证范围见下文。源码构建使用 `cargo install --path . --locked`。详细步骤见[安装指南](INSTALL.md)。
 
 ### 3. 验证一次真实调查
 

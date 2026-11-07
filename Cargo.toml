@@ -6,6 +6,7 @@ rust-version = "1.88"
 license = "MIT"
 description = "Read-only dsh investigations through the Codex OS sandbox"
 readme = "README.md"
+repository = "https://github.com/JIAFALSEDREAM/dsh-delegate-rs"
 keywords = ["mcp", "sandbox", "cli", "dsh"]
 categories = ["command-line-utilities", "development-tools"]
 include = ["src/**", "tests/**", "examples/**", "Cargo.toml", "Cargo.lock", "README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md", "docs/dsh-contract.md", "docs/validation.md", "LICENSE"]

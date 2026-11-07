@@ -12,7 +12,13 @@ This project does not bundle or install dsh or Codex CLI. Actual validation of t
 
 ## Build and initialize
 
-The following instructions cover source builds and initialization. Refer to the relevant distribution channel for available package versions and platforms.
+Choose an installation channel:
+
+- **npm**: `npm install -g dsh-delegate-rs`. Requires Node.js 24.9.0+, without Rust. Optional dependencies select the platform binary; no install script is used. Keep optional dependencies enabled. If the platform package is missing, reinstall with `npm install -g dsh-delegate-rs --include=optional`.
+- **GitHub Releases**: [download the archive for your platform](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases), verify it against `SHA256SUMS`, extract it, and put the binary on PATH.
+- **crates.io**: `cargo install dsh-delegate-rs --locked`, requiring the Rust and C toolchains above.
+
+The release matrix includes Linux x64/arm64 (musl), macOS x64/arm64, and Windows x64/arm64. These channels do not install dsh or Codex CLI. Initialize configuration, set the model and authentication, then run `dsh-delegate-rs install` to connect Codex MCP.
 
 For installation from the repository:
 
@@ -177,11 +183,15 @@ If the operating system cannot confirm termination of the entire sandbox process
 
 Uninstall cancels tasks in the selected `state_dir`, including CLI tasks, even if the current Codex directory has no Rust MCP registration. Codex directories sharing state also share the task pool and cleanup policy; use separate state directories for isolation. New submissions are blocked during shutdown checks. Retry uninstall later if a task is being submitted or started.
 
-## Maintainer packaging scaffolding
+## Maintainer release workflow
 
 `npm/`, `scripts/release.py`, and publication tooling support six-platform binary/npm packaging, checksums, and immutable-version reconciliation. Before publishing, verify real repository metadata, package/account permissions, registry authentication, and results on each target platform.
 
-The Release workflow runs manually and defaults to build/validation only; publishing jobs also require explicitly enabling `publish`. Future publication requires a separate decision on repository ownership and real repository metadata, package/account permissions, registry authentication, actual six-platform results, and release authorization. Version preparation changes only this package's Cargo/npm versions, without dependency changes or commits. Validation rejects mismatched repository metadata and stable tags outside default-branch history. Scripts reject unrelated dirty files; published artifacts are reused only after integrity checks. Publication across channels is not atomic.
+The repository is `JIAFALSEDREAM/dsh-delegate-rs`. Pushing a `vMAJOR.MINOR.PATCH` tag contained in the default branch's history triggers Release: validate versions and repository metadata, build and test six platforms, generate archives and `SHA256SUMS`, then publish GitHub Release, the npm entry and six platform packages, and the crates.io crate.
+
+npm uses Trusted Publishing (GitHub OIDC); configure the entry and six platform packages to trust this repository's `release.yml`. crates.io uses the repository secret `CARGO_REGISTRY_TOKEN`. GitHub Release uses the built-in `GITHUB_TOKEN`. Configure these identities in the relevant services; keep credentials out of source.
+
+Version preparation changes only this package's Cargo/npm versions, without dependency changes or commits. Validation rejects mismatched repository metadata and stable tags outside default-branch history. Scripts reject unrelated dirty files; published artifacts are reused only after integrity checks. Publication across channels is not atomic.
 
 Local checks without publication:
 

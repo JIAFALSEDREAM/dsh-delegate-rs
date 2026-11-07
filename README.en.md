@@ -2,6 +2,10 @@
 
 [简体中文](README.md) | English
 
+[![npm version](https://img.shields.io/npm/v/dsh-delegate-rs?style=flat-square&logo=npm)](https://www.npmjs.com/package/dsh-delegate-rs)
+[![crates.io version](https://img.shields.io/crates/v/dsh-delegate-rs?style=flat-square&logo=rust)](https://crates.io/crates/dsh-delegate-rs)
+[![GitHub release](https://img.shields.io/github/v/release/JIAFALSEDREAM/dsh-delegate-rs?style=flat-square&logo=github)](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases/latest)
+[![CI status](https://img.shields.io/github/actions/workflow/status/JIAFALSEDREAM/dsh-delegate-rs/ci.yml?branch=main&style=flat-square&logo=githubactions&label=CI)](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/actions/workflows/ci.yml)
 [![Rust 1.88+](https://img.shields.io/badge/Rust-1.88%2B-orange?style=flat-square&logo=rust)](INSTALL.en.md#prerequisites)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
@@ -22,17 +26,17 @@ The default route matches dsh-base: **`deepseek-official/deepseek-flash`**. A ma
 
 See the [installation guide](INSTALL.en.md#prerequisites) for prerequisites. This package does not install dsh or Codex CLI.
 
-### 2. Install from local source
+### 2. Install and connect to Codex
 
 ```sh
-cargo install --path . --locked
+npm install -g dsh-delegate-rs
 dsh-delegate-rs init
-dsh-delegate-rs doctor
+dsh-delegate-rs install
 ```
 
-Run these commands at the repository root. Configure API access as described below before running `doctor`. These steps do not register MCP. Codex configuration changes only when you explicitly run `install` or `register`; see [registration](INSTALL.en.md#register-with-codex-mcp).
+npm selects the binary for your platform; Rust is not required. After `init` creates configuration, set the model and authentication below before running `install`. The installer checks dependencies and the sandbox, registers MCP, and adds managed AGENTS rules. Start a new Codex session afterward to use `dsh_submit` and the other tools. Use `doctor` to check the runtime without registering MCP.
 
-Refer to the relevant distribution channel for available package versions and platforms. Source builds use this repository.
+You can also download a binary from [GitHub Releases](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases), or run `cargo install dsh-delegate-rs --locked`. The release workflow targets x86_64 and ARM64 on Linux, macOS, and Windows; see the actual validation scope below. Build from source with `cargo install --path . --locked`. See the [installation guide](INSTALL.en.md) for details.
 
 ### 3. Verify a real investigation
 

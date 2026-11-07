@@ -12,7 +12,13 @@
 
 ## 构建与初始化
 
-以下说明源码构建与初始化。发布包的版本和可用平台以对应发行渠道为准。
+可选择以下安装渠道：
+
+- **npm**：`npm install -g dsh-delegate-rs`，需要 Node.js 24.9.0+，无需 Rust；通过可选依赖安装匹配系统和架构的二进制，不使用安装脚本。不要禁用 optional dependencies；缺少平台包时用 `npm install -g dsh-delegate-rs --include=optional` 重装。
+- **GitHub Releases**：[下载对应平台的归档](https://github.com/JIAFALSEDREAM/dsh-delegate-rs/releases)，对照 `SHA256SUMS` 校验，解压后把二进制放入 PATH。
+- **crates.io**：`cargo install dsh-delegate-rs --locked`，需要前述 Rust 和 C 编译工具链。
+
+发布矩阵包含 Linux x64/arm64（musl）、macOS x64/arm64、Windows x64/arm64。以上渠道都不安装 dsh 或 Codex CLI。初始化后配置模型和认证，再执行 `dsh-delegate-rs install` 接入 Codex MCP。
 
 在仓库目录执行：
 
@@ -166,11 +172,15 @@ Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无�
 
 卸载的取消范围是选中的 state_dir，包括 CLI 任务，即使当前 Codex 配置目录没有 Rust 注册也会停止该任务池。多个 Codex 配置目录共用状态目录时共用任务池和清理策略；需要隔离任务时，请分别配置 state_dir。程序会在关闭检查期间阻止新提交；遇到正在提交或启动的任务时需稍后重试卸载。
 
-## 维护者打包框架
+## 维护者发布流程
 
 `npm/`、`scripts/release.py` 和发布工具支持六平台二进制、平台 npm 包、校验和与不可变版本核验。发布前应核实真实 repository 元数据、包名与账号权限、registry 认证及目标平台结果。
 
-Release workflow 仅手动触发，默认只构建验证；发布 job 还要求显式开启 `publish`。未来发版前须单独确认仓库归属与真实 repository 元数据、包名/账号权限、registry 认证、六平台实际结果和发布授权。版本准备只修改本包 Cargo/npm 版本，不改依赖、不生成提交；validate 拒绝仓库元数据不匹配和不在默认分支历史中的稳定 tag。脚本拒绝无关脏文件，已发布产物须校验一致后才复用。各发布渠道不具原子性。
+仓库为 `JIAFALSEDREAM/dsh-delegate-rs`。推送位于默认分支历史中的 `vMAJOR.MINOR.PATCH` 标签会触发 Release workflow：校验版本与仓库、构建和测试六个平台、生成归档及 `SHA256SUMS`，随后发布 GitHub Release、npm 入口及六个平台包、crates.io crate。
+
+npm 使用 Trusted Publishing（GitHub OIDC），需为入口包和六个平台包配置此仓库的 `release.yml` 发布身份；crates.io 读取仓库 secret `CARGO_REGISTRY_TOKEN`。GitHub Release 使用内置 `GITHUB_TOKEN`。这些发布身份需在对应服务中配置，不写入源码。
+
+版本准备只修改本包 Cargo/npm 版本，不改依赖、不生成提交；validate 拒绝仓库元数据不匹配和不在默认分支历史中的稳定 tag。脚本拒绝无关脏文件，已发布产物须校验一致后才复用。各发布渠道不具原子性。
 
 本地验证（不发布）：
 

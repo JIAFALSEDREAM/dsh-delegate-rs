@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Read-only dsh investigations through the Codex OS sandbox",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JIAFALSEDREAM/dsh-delegate-rs.git"
+  },
   "bin": {
     "dsh-delegate-rs": "bin/dsh-delegate-rs.cjs"
   },

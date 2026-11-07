@@ -1,26 +1,18 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing stable tag to validate (vMAJOR.MINOR.PATCH)'
-        required: true
-        type: string
-      publish:
-        description: 'Publish artifacts after separately approving the release'
-        type: boolean
-        default: false
+  push:
+    tags: ['v*.*.*']
 
 permissions:
   contents: read
 
 env:
   RUST_BACKTRACE: '1'
-  RELEASE_TAG: ${{ inputs.tag }}
+  RELEASE_TAG: ${{ github.ref_name }}
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -36,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.ref_name }}
           fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
@@ -87,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
@@ -162,7 +154,6 @@ jobs:
           if-no-files-found: error
 
   github:
-    if: inputs.publish
     needs: [validate, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -171,7 +162,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -209,7 +200,6 @@ jobs:
           if-no-files-found: error
 
   npm:
-    if: inputs.publish
     needs: [validate, github]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -219,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -243,14 +233,13 @@ jobs:
           node scripts/publish-npm.mjs "dist/dsh-delegate-rs-$VERSION.tgz" "$VERSION"
 
   crates:
-    if: inputs.publish
     needs: [validate, github]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.ref_name }}
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
