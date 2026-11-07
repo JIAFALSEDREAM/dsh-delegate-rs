@@ -1,0 +1,934 @@
+use crate::config::{Config, private_dir};
+use anyhow::{Context, Result, ensure};
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::Dir;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    path::Path,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::Command,
+};
+
+pub fn detach(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(windows)]
+    command.creation_flags(0x00000200 | 0x08000000);
+}
+struct OwnedChild {
+    process: Option<Box<dyn ChildWrapper>>,
+    raw_log: Option<RawLog>,
+    group_id: Option<u32>,
+}
+impl OwnedChild {
+    fn process(&mut self) -> &mut Box<dyn ChildWrapper> {
+        self.process.as_mut().unwrap()
+    }
+    async fn stop(&mut self) -> Result<RawLog> {
+        let process = self.process.take().context("Missing sandbox process")?;
+        let raw_log = self.raw_log.take().context("Missing raw log ownership")?;
+        let group_id = self.group_id;
+        tokio::task::spawn_blocking(move || stop_owned(process, raw_log, group_id)).await?
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut process) = self.process.take() else {
+            return;
+        };
+        let _ = process.start_kill();
+        if let Some(raw_log) = self.raw_log.take() {
+            let group_id = self.group_id;
+            let cleanup = move || {
+                // Blocking tasks survive async cancellation and are joined at runtime shutdown.
+                let _ = stop_owned(process, raw_log, group_id);
+            };
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn_blocking(cleanup);
+            } else {
+                cleanup();
+            }
+        }
+    }
+}
+fn stop_owned(
+    mut process: Box<dyn ChildWrapper>,
+    mut raw_log: RawLog,
+    _group_id: Option<u32>,
+) -> Result<RawLog> {
+    let stopped = (|| -> Result<()> {
+        let killed = process.start_kill();
+        #[cfg(unix)]
+        let killed = killed.or_else(|error| {
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        });
+        killed.context("Cannot stop owned sandbox tree")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let reaped = matches!(process.try_wait(), Ok(Some(_)));
+            #[cfg(windows)]
+            if reaped {
+                return Ok(());
+            }
+            #[cfg(unix)]
+            if let Some(pid) = _group_id {
+                let gone = unsafe { libc::kill(-(pid as i32), 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                if gone && reaped {
+                    return Ok(());
+                }
+            }
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "Sandbox shutdown timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if let Err(error) = stopped {
+        // Never pretend raw data was sanitized when process termination could not be verified.
+        raw_log.1 = false;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        if let Ok(mut marker) = raw_log.0.open_with("UNVERIFIED_PROCESS", &options) {
+            use std::io::Write;
+            let _ = marker.write_all(
+                b"Raw log retained privately; verify process termination before cleanup.\n",
+            );
+        }
+        return Err(error.context("Process termination unverified; raw log retained privately"));
+    }
+    Ok(raw_log)
+}
+struct PipeTask(tokio::task::JoinHandle<std::io::Result<Vec<u8>>>);
+impl Drop for PipeTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+struct RawLog(Arc<Dir>, bool);
+impl Drop for RawLog {
+    fn drop(&mut self) {
+        if self.1 {
+            let _ = self.0.remove_file("dsh.log");
+        }
+    }
+}
+
+async fn notify(
+    future: impl Future<Output = Result<()>>,
+    cancel: &Path,
+    stop: &AtomicBool,
+) -> Result<bool> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result.map(|()|true),
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                if cancel.exists() || stop.load(Ordering::Relaxed) { return Ok(false); }
+            }
+        }
+    }
+}
+
+fn permission_denied(error: &Value) -> bool {
+    match error {
+        Value::String(text) => stderr_denial(text),
+        Value::Object(object) => {
+            ["code", "status", "type"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| {
+                        matches!(
+                            text.to_lowercase().replace(['_', '-'], " ").as_str(),
+                            "soft denied"
+                                | "permission denied"
+                                | "eacces"
+                                | "approval denied"
+                                | "auto review denied"
+                                | "sandbox unavailable"
+                                | "sandbox denied"
+                        )
+                    })
+            }) || ["message", "reason"]
+                .iter()
+                .any(|key| object.get(*key).is_some_and(permission_denied))
+        }
+        Value::Array(values) => values.iter().any(permission_denied),
+        _ => false,
+    }
+}
+fn stderr_denial(text: &str) -> bool {
+    let text = text.to_lowercase().replace(['_', '-'], " ");
+    text.split(['\n', '\r', '\0']).any(|line| {
+        let line = line.trim();
+        let diagnostic = line.strip_prefix("error: ").unwrap_or(line);
+        let terms = [
+            "soft denied",
+            "permission denied",
+            "denied permission",
+            "permission request denied",
+        ];
+        let direct = |text: &str| {
+            terms.iter().any(|term| {
+                text.strip_prefix(term).is_some_and(|rest| {
+                    rest.is_empty()
+                        || rest.starts_with([':', ','])
+                        || rest.starts_with(" (os error ")
+                })
+            })
+        };
+        direct(diagnostic)
+            || [
+                "cat:", "rg:", "grep:", "find:", "sed:", "head:", "tail:", "ls:", "stat:", "open:",
+                "eacces:",
+            ]
+            .iter()
+            .any(|prefix| {
+                diagnostic.strip_prefix(prefix).is_some_and(|rest| {
+                    direct(rest.trim())
+                        || rest
+                            .rsplit_once(": ")
+                            .is_some_and(|(_, suffix)| direct(suffix))
+                })
+            })
+    })
+}
+pub use crate::protocol::classify;
+pub use crate::redaction::redact_value;
+
+fn log_size(root: &Dir) -> Result<u64> {
+    match root.symlink_metadata("dsh.log") {
+        Ok(metadata) => {
+            ensure!(metadata.is_file(), "dsh log must be a regular file");
+            Ok(metadata.len())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn finish_log(root: &Dir, limit: u64, redactor: &crate::redaction::Redactor) -> Result<()> {
+    let result = sanitize_log(root, limit, redactor);
+    if let Err(ref failure) = result {
+        match root.remove_file("dsh.log") {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                anyhow::bail!("Cannot sanitize dsh log: {failure}; Cannot discard raw log: {error}")
+            }
+        }
+    }
+    ensure!(!result?, "dsh log exceeded configured log_bytes limit");
+    Ok(())
+}
+fn sanitize_log(root: &Dir, limit: u64, redactor: &crate::redaction::Redactor) -> Result<bool> {
+    use std::io::{Read, Write};
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = match root.open_with("dsh.log", &options) {
+        Ok(file) => file.into_std(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(file.metadata()?.is_file(), "dsh log must be a regular file");
+    let mut bytes = Vec::new();
+    (&mut file).take(limit + 1).read_to_end(&mut bytes)?;
+    let exceeded = bytes.len() as u64 > limit;
+    bytes.truncate(limit as usize);
+    let mut bytes = redactor.bytes(&bytes, exceeded);
+    bytes.truncate(limit as usize);
+    drop(file);
+    let name = format!(".dsh-log-{}", uuid::Uuid::new_v4());
+    let replacement = (|| -> Result<()> {
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = root.open_with(&name, &options)?;
+        file.write_all(&bytes)?;
+        drop(file);
+        root.rename(&name, root, "dsh.log")?;
+        Ok(())
+    })();
+    if replacement.is_err() {
+        let _ = root.remove_file(&name);
+    }
+    replacement?;
+    Ok(exceeded)
+}
+
+fn persist_logs(
+    dir: &Path,
+    root: &Dir,
+    limit: u64,
+    redactor: &crate::redaction::Redactor,
+    stderr: &str,
+) -> Result<()> {
+    let finished = finish_log(root, limit, redactor);
+    let stored = fs::write(dir.join("stderr.log"), stderr);
+    match (finished, stored) {
+        (Err(log), Err(stderr)) => {
+            anyhow::bail!("Cannot finish dsh log: {log}; Cannot persist diagnostics: {stderr}")
+        }
+        (Err(error), _) => Err(error),
+        (_, Err(error)) => Err(error.into()),
+        _ => Ok(()),
+    }
+}
+
+pub async fn run(
+    config: &Config,
+    cwd: &Path,
+    task: &str,
+    conversation: Option<&str>,
+    dir: &Path,
+    progress: impl AsyncFnMut(Value) -> Result<()>,
+) -> Result<Value> {
+    run_with_stop(
+        config,
+        cwd,
+        task,
+        conversation,
+        RunPaths {
+            job: dir,
+            profile: None,
+        },
+        &AtomicBool::new(false),
+        progress,
+    )
+    .await
+}
+
+pub(crate) struct RunPaths<'a> {
+    pub job: &'a Path,
+    pub profile: Option<(&'a crate::profiles::Profiles, &'a str)>,
+}
+
+async fn profile_usage(
+    profile: &crate::profiles::Profile,
+    limit: u64,
+    links: &crate::harness::PluginLinks,
+) -> Result<()> {
+    let links = links.clone();
+    let root = profile.directory.clone();
+    let bytes =
+        tokio::task::spawn_blocking(move || crate::tree::usage_with_links(&root, limit, &links))
+            .await
+            .context("Conversation size scan panicked")??;
+    ensure!(
+        bytes <= limit,
+        "Conversation directory exceeded configured profile_bytes limit"
+    );
+    Ok(())
+}
+
+struct Deadline(tokio::time::Instant);
+impl Deadline {
+    fn new(timeout: Duration) -> Self {
+        Self(tokio::time::Instant::now() + timeout)
+    }
+    #[cfg(test)]
+    fn dsh_timeout(&self) -> Result<String> {
+        let remaining = self
+            .0
+            .saturating_duration_since(tokio::time::Instant::now());
+        ensure!(
+            !remaining.is_zero(),
+            "Task deadline exceeded before backend startup"
+        );
+        Ok(format!("{}ms", remaining.as_millis().max(1)))
+    }
+    fn bound<F: Future>(&self, future: F, grace: Duration) -> tokio::time::Timeout<F> {
+        tokio::time::timeout_at(self.0 + grace, future)
+    }
+}
+
+async fn prepare_prompt(
+    load: impl FnOnce() -> Result<String> + Send + 'static,
+    cancel: &Path,
+    stop: &AtomicBool,
+    deadline: &Deadline,
+) -> Result<Option<String>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    // Detached read-only IO must not hold Tokio shutdown or any job/profile lease open.
+    std::thread::Builder::new()
+        .name("dsh-instructions".into())
+        .spawn(move || {
+            let _ = sender.send(load());
+        })
+        .context("Cannot start instruction loader")?;
+    let mut prompt = None;
+    let loaded = deadline
+        .bound(
+            notify(
+                async {
+                    prompt = Some(receiver.await.context("Instruction loader stopped")??);
+                    Ok(())
+                },
+                cancel,
+                stop,
+            ),
+            Duration::ZERO,
+        )
+        .await
+        .context("Instruction loading deadline exceeded")??;
+    Ok(if loaded { prompt } else { None })
+}
+
+pub(crate) async fn run_with_stop(
+    config: &Config,
+    cwd: &Path,
+    task: &str,
+    conversation: Option<&str>,
+    paths: RunPaths<'_>,
+    stop: &AtomicBool,
+    mut progress: impl AsyncFnMut(Value) -> Result<()>,
+) -> Result<Value> {
+    let dir = paths.job;
+    config.validate()?;
+    let deadline = Deadline::new(Duration::from_secs(config.timeout));
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+        return Ok(json!({"status":"cancelled"}));
+    }
+    let cwd = cwd.canonicalize()?;
+    let prompt_cwd = cwd.clone();
+    let prompt_task = task.to_owned();
+    let Some(prompt) = prepare_prompt(
+        move || crate::prompt::build(&prompt_cwd, &prompt_task),
+        &dir.join("cancel"),
+        stop,
+        &deadline,
+    )
+    .await?
+    else {
+        return Ok(json!({"status":"cancelled"}));
+    };
+    let tmp = private_dir(&dir.join("tmp"))?;
+    let log_root = Arc::new(Dir::open_ambient_dir(&tmp, cap_std::ambient_authority())?);
+    let raw_log = RawLog(log_root.clone(), true);
+    let prepared = if let Some((profiles, id)) = paths.profile {
+        let profiles = profiles.clone();
+        let id = id.to_owned();
+        // Always join preparation before returning, retaining the worker's ownership lease.
+        tokio::task::spawn_blocking(move || profiles.prepare(&id))
+            .await
+            .context("Conversation preparation panicked")
+            .and_then(|result| result)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+        return Ok(
+            json!({"status":"cancelled","error":prepared.err().map(|error| format!("Conversation preparation: {error:#}"))}),
+        );
+    }
+    let profile = prepared?;
+    let plugin_links = match &profile {
+        Some(profile) => crate::harness::link_plugins(&profile.directory, &config.dsh_plugins)?,
+        None => crate::harness::PluginLinks::new(),
+    };
+    let initial_scan = match &profile {
+        Some(profile) => profile_usage(profile, config.profile_bytes, &plugin_links).await,
+        None => Ok(()),
+    };
+    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+        return Ok(
+            json!({"status":"cancelled","error":initial_scan.err().map(|error| format!("Initial conversation check: {error:#}"))}),
+        );
+    }
+    initial_scan.context("Initial conversation check")?;
+    let mut cmd = config.sandbox_profile(
+        &cwd,
+        &tmp,
+        profile.as_ref().map(|profile| profile.path.as_path()),
+    )?;
+    let environment = cmd
+        .as_std()
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+        .collect();
+    let home = match &profile {
+        Some(profile) => profile.directory.clone(),
+        None => Arc::new(Dir::open_ambient_dir(
+            tmp.join("dsh-home"),
+            cap_std::ambient_authority(),
+        )?),
+    };
+    if profile.is_none() {
+        crate::harness::link_plugins(&home, &config.dsh_plugins)?;
+    }
+    let overlay = crate::harness::write_overlay(config, dir)?;
+    cmd.arg(config.executable(&config.dsh, &environment, &cwd))
+        .args(&config.dsh_args)
+        .args(["--profile", "headless"]);
+    crate::harness::provider_patches(&mut cmd, config);
+    cmd.arg("--patch").arg(overlay).args([
+        "--json",
+        "--permission-mode",
+        "read-only",
+        "--approval-policy",
+        "never",
+    ]);
+    if let Some(id) = conversation {
+        cmd.args(["--session-id", id]);
+    }
+    cmd.arg("-");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let secrets = Config::secrets(&environment)?;
+    let redactor = Arc::new(crate::redaction::Redactor::new(&secrets)?);
+    let mut wrapped = CommandWrap::from(cmd);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::tokio::ProcessSession);
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::tokio::JobObject);
+    wrapped.wrap(KillOnDrop);
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    let mut event_log = log_root.open_with("dsh.log", &options)?;
+    let process = wrapped
+        .spawn()
+        .context("Cannot start codex sandbox; unsandboxed execution is refused")?;
+    let mut child = OwnedChild {
+        group_id: process.id(),
+        process: Some(process),
+        raw_log: Some(raw_log),
+    };
+    let mut stdout = BufReader::new(
+        child
+            .process()
+            .stdout()
+            .take()
+            .context("Missing stdout")?
+            .take(4_000_001),
+    );
+    let mut stderr = child.process().stderr().take().context("Missing stderr")?;
+    let diagnostic_redactor = redactor.clone();
+    let denied = Arc::new(AtomicBool::new(false));
+    let stderr_denied = denied.clone();
+    let diagnostic_limit = config.log_bytes.min(65536) as usize;
+    let mut err_task = PipeTask(tokio::spawn(async move {
+        let mut retained = Vec::new();
+        let mut truncated = false;
+        let mut chunk = [0; 8192];
+        let mut tail = Vec::new();
+        let mut overflow = false;
+        loop {
+            let n = stderr.read(&mut chunk).await?;
+            if n == 0 {
+                if !overflow && stderr_denial(&String::from_utf8_lossy(&tail)) {
+                    stderr_denied.store(true, Ordering::Relaxed);
+                }
+                break;
+            }
+            // Inspect complete bounded diagnostics, never a context-free suffix.
+            for &byte in &chunk[..n] {
+                if matches!(byte, b'\n' | b'\r' | b'\0') {
+                    if !overflow && stderr_denial(&String::from_utf8_lossy(&tail)) {
+                        stderr_denied.store(true, Ordering::Relaxed);
+                    }
+                    tail.clear();
+                    overflow = false;
+                } else if !(tail.is_empty() && byte.is_ascii_whitespace()) {
+                    if tail.len() < 4096 {
+                        tail.push(byte);
+                    } else {
+                        overflow = true;
+                    }
+                }
+            }
+            let kept = n.min(diagnostic_limit - retained.len());
+            truncated |= kept < n;
+            retained.extend_from_slice(&chunk[..kept]);
+        }
+        Ok(diagnostic_redactor.bytes(&retained, truncated))
+    }));
+    let outcome = async {
+        if !notify(
+            progress(json!({"event":"sandbox_started","pid":child.process().id()})),
+            &dir.join("cancel"),
+            stop,
+        )
+        .await?
+        {
+            return Ok(json!({"status":"cancelled"}));
+        }
+        let mut stdin = child.process().stdin().take().context("Missing stdin")?;
+        if !notify(
+            async {
+                stdin.write_all(prompt.as_bytes()).await?;
+                stdin.shutdown().await?;
+                Ok(())
+            },
+            &dir.join("cancel"),
+            stop,
+        )
+        .await?
+        {
+            return Ok(json!({"status":"cancelled"}));
+        }
+        drop(stdin);
+        let mut stream = crate::protocol::Stream::default();
+        let mut bytes = 0;
+        let mut frame = Vec::new();
+        loop {
+            if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
+                return Ok(json!({"status":"cancelled"}));
+            }
+            tokio::select! {
+                n = stdout.read_until(b'\n', &mut frame) => {
+                    if n? == 0 && frame.is_empty() { break; }
+                    bytes += frame.len(); ensure!(bytes <= 4_000_000, "dsh output exceeded 4 MB");
+                    let mut event: Value = serde_json::from_slice(&frame).context("Invalid dsh event")?;
+                    ensure!(event["event"] != "sandbox_started", "Reserved internal event from dsh");
+                    frame.clear();
+                    if event["type"] == "tool_result" && permission_denied(&event["error"]) {
+                        denied.store(true, Ordering::Relaxed);
+                    }
+                    redactor.value(&mut event);
+                    stream.observe(&event, conversation)?;
+                    let mut record = serde_json::to_vec(&event)?;
+                    record.push(b'\n');
+                    use std::io::Write;
+                    event_log.write_all(&record)?;
+                    ensure!(event_log.metadata()?.len() <= config.log_bytes,
+                        "dsh log exceeded configured log_bytes limit");
+                    if !notify(progress(event), &dir.join("cancel"), stop).await? { return Ok(json!({"status":"cancelled"})); }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+        loop {
+            tokio::select! {
+                exit = child.process().wait() => return Ok(stream.finish(exit?.code().unwrap_or(-1))),
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                    if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) { return Ok(json!({"status":"cancelled"})); }
+                }
+            }
+        }
+    };
+    let log_guard = async {
+        loop {
+            if log_size(&log_root)? > config.log_bytes {
+                return Err::<Value, anyhow::Error>(anyhow::anyhow!(
+                    "dsh log exceeded configured log_bytes limit"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let mut profile_scan = None;
+    let profile_guard = async {
+        if let Some(profile) = &profile {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let root = profile.directory.clone();
+                let limit = config.profile_bytes;
+                let links = plugin_links.clone();
+                profile_scan = Some(tokio::task::spawn_blocking(move || {
+                    crate::tree::usage_with_links(&root, limit, &links)
+                }));
+                let scanned = profile_scan.as_mut().unwrap().await;
+                profile_scan.take();
+                ensure!(
+                    scanned
+                        .context("Conversation size scan panicked")?
+                        .context("Periodic conversation check")?
+                        <= limit,
+                    "Conversation directory exceeded configured profile_bytes limit"
+                );
+            }
+        }
+        std::future::pending::<Result<Value>>().await
+    };
+    let outcome = deadline.bound(async {
+        tokio::select! { result = outcome => result, result = log_guard => result, result = profile_guard => result }
+    }, Duration::ZERO)
+    .await;
+    let result = match outcome {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Ok(json!({"status":"timed_out","error":"Task deadline exceeded"})),
+    };
+    drop(event_log);
+    let stopped = child.stop().await;
+    // Join even on a failed stop. A cancelled blocking scan must not outlive worker ownership.
+    if let Some(scan) = profile_scan.take() {
+        let _ = scan.await;
+    }
+    let raw_log = match stopped {
+        Ok(raw_log) => raw_log,
+        Err(stop) => {
+            return Err(match result {
+                Err(primary) => primary.context(format!("Sandbox shutdown failed: {stop:#}")),
+                Ok(_) => stop,
+            });
+        }
+    };
+    let diagnostics = match tokio::time::timeout(Duration::from_secs(1), &mut err_task.0).await {
+        Ok(Ok(Ok(bytes))) => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => "Diagnostics unavailable or pipe did not close".into(),
+    };
+    let mut stderr = Value::String(diagnostics);
+    redactor.value(&mut stderr);
+    let text = stderr.as_str().unwrap();
+    let mut end = text.len().min(diagnostic_limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    stderr = Value::String(text[..end].to_owned());
+    // The process tree has stopped. Read/write through a pinned root without following links.
+    let log_directory = dir.to_owned();
+    let limit = config.log_bytes;
+    let diagnostics = stderr.as_str().unwrap().to_owned();
+    let log_redactor = redactor.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = raw_log;
+        let persisted = persist_logs(&log_directory, &guard.0, limit, &log_redactor, &diagnostics);
+        guard.1 = false;
+        drop(guard);
+        persisted
+    })
+    .await
+    .context("Log finalization panicked")??;
+    let result = result.map(|mut value| {
+        if value["status"] == "failed" {
+            let detail = stderr
+                .as_str()
+                .unwrap()
+                .trim()
+                .chars()
+                .take(1000)
+                .collect::<String>();
+            let original = value["error"].as_str().unwrap_or("dsh failed");
+            if !detail.is_empty() && !original.contains(&detail) {
+                value["error"] = format!("{original}; dsh diagnostics: {detail}").into();
+            }
+        }
+        value
+    });
+    let final_scan = match &profile {
+        Some(profile) => profile_usage(profile, config.profile_bytes, &plugin_links).await,
+        None => Ok(()),
+    };
+    let mut value = match (result, final_scan) {
+        (Err(primary), Err(scan)) => {
+            return Err(primary.context(format!("Final conversation check: {scan:#}")));
+        }
+        (Err(error), _) => return Err(error),
+        (Ok(value), Err(scan)) if value["status"] == "succeeded" => {
+            return Err(scan.context("Final conversation check"));
+        }
+        (Ok(mut value), Err(scan)) => {
+            let original = value["error"].as_str().unwrap_or_default();
+            value["error"] = format!("{original}; Final conversation check: {scan:#}")
+                .trim_start_matches("; ")
+                .into();
+            value
+        }
+        (Ok(value), Ok(())) => value,
+    };
+    if value["status"] == "succeeded" && denied.load(Ordering::Relaxed) {
+        value["status"] = "incomplete".into();
+        value["error"] = "One or more actions were denied; inspect the report".into();
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn successful_preparation_consumes_the_backend_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Deadline::new(Duration::from_secs(1));
+        assert!(
+            prepare_prompt(
+                || {
+                    std::thread::sleep(Duration::from_millis(250));
+                    Ok(String::new())
+                },
+                &dir.path().join("cancel"),
+                &AtomicBool::new(false),
+                &deadline
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        let milliseconds: u128 = deadline
+            .dsh_timeout()
+            .unwrap()
+            .strip_suffix("ms")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            milliseconds <= 750,
+            "Backend received a fresh full budget: {milliseconds}"
+        );
+        assert!(
+            deadline
+                .bound(tokio::time::sleep(Duration::from_secs(2)), Duration::ZERO)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn instruction_timeout_does_not_delay_process_exit() {
+        const CHILD: &str = "DSH_INSTRUCTION_EXIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let error = runtime
+                .block_on(prepare_prompt(
+                    || {
+                        std::thread::sleep(Duration::from_secs(30));
+                        Ok(String::new())
+                    },
+                    Path::new("unused-cancel-marker"),
+                    &AtomicBool::new(false),
+                    &Deadline::new(Duration::from_millis(10)),
+                ))
+                .unwrap_err();
+            assert!(error.to_string().contains("deadline"));
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runner::log_tests::instruction_timeout_does_not_delay_process_exit",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("Timed-out instruction read prevented process exit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_instruction_loading_yields_to_cancellation_and_deadlines() {
+        for mode in ["flag", "file", "deadline"] {
+            let cancel = mode != "deadline";
+            let dir = tempfile::tempdir().unwrap();
+            let marker = dir.path().join("cancel");
+            let flag = AtomicBool::new(false);
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let deadline = Deadline::new(Duration::from_millis(if cancel { 1000 } else { 10 }));
+            let future = prepare_prompt(
+                move || {
+                    let _ = wait.recv_timeout(Duration::from_secs(2));
+                    Ok("instructions".into())
+                },
+                &marker,
+                &flag,
+                &deadline,
+            );
+            tokio::pin!(future);
+            if cancel {
+                tokio::select! {
+                    _ = &mut future => panic!("Loading blocked the async cancellation timer"),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if mode == "file" { fs::write(&marker, "").unwrap(); }
+                        else { flag.store(true, Ordering::Relaxed); }
+                    },
+                }
+                assert!(future.await.unwrap().is_none());
+            } else {
+                assert!(future.await.unwrap_err().to_string().contains("deadline"));
+            }
+            let _ = release.send(());
+        }
+    }
+
+    #[test]
+    fn diagnostic_write_failure_does_not_skip_application_log_sanitization() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::create_dir(&tmp).unwrap();
+        fs::write(tmp.join("dsh.log"), "private-log-secret").unwrap();
+        fs::create_dir(dir.path().join("stderr.log")).unwrap();
+        let root = Dir::open_ambient_dir(&tmp, cap_std::ambient_authority()).unwrap();
+        let redactor = crate::redaction::Redactor::new(&["private-log-secret".into()]).unwrap();
+        assert!(persist_logs(dir.path(), &root, 4096, &redactor, "diagnostic").is_err());
+        assert_eq!(
+            fs::read_to_string(tmp.join("dsh.log")).unwrap(),
+            "[REDACTED]"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_raw_logs_are_unlinked_without_sanitization() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("dsh.log");
+        fs::write(&log, "private-log-secret").unwrap();
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o200)).unwrap();
+        let root = Dir::open_ambient_dir(tmp.path(), cap_std::ambient_authority()).unwrap();
+        let redactor = crate::redaction::Redactor::new(&["private-log-secret".into()]).unwrap();
+        assert!(finish_log(&root, 4096, &redactor).is_err());
+        assert!(!log.exists());
+    }
+}

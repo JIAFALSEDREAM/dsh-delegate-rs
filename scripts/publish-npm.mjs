@@ -1,0 +1,41 @@
+import fs from "node:fs";
+import crypto from "node:crypto";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+
+const [archive, version, name = "dsh-delegate-rs"] = process.argv.slice(2);
+if (!archive || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "") ||
+    !/^dsh-delegate-rs(?:-(?:linux|darwin|win32)-(?:x64|arm64))?$/.test(name)) {
+  throw new Error("usage: node scripts/publish-npm.mjs ARCHIVE VERSION [PACKAGE_NAME]");
+}
+const integrity = `sha512-${crypto.createHash("sha512").update(fs.readFileSync(archive)).digest("base64")}`;
+// npm interprets an unprefixed relative path such as dist/package.tgz as
+// a GitHub shorthand instead of a local archive. Always pass an absolute path.
+const archivePath = path.resolve(archive);
+const spec = `${name}@${version}`;
+const query = spawnSync("npm", ["view", spec, "dist.integrity", "--json"], { encoding: "utf8" });
+if (query.error) throw query.error;
+let metadata;
+try { metadata = JSON.parse(query.stdout); }
+catch { throw new Error(`Cannot query registry for ${spec}: ${query.stderr}`); }
+if (query.status === 0) {
+  if (metadata !== integrity) throw new Error(`Published ${spec} differs from this artifact`);
+  console.log(`Verified existing publication: ${spec}`);
+} else {
+  if (metadata?.error?.code !== "E404") throw new Error(`Registry query failed: ${query.stderr || query.stdout}`);
+  const publish = spawnSync("npm", ["publish", archivePath, "--access", "public", "--provenance"], { stdio: "inherit" });
+  if (publish.error) throw publish.error;
+  if (publish.status !== 0) {
+    let confirmed = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+      const retry = spawnSync("npm", ["view", spec, "dist.integrity", "--json"], { encoding: "utf8" });
+      if (retry.status !== 0) continue;
+      const published = JSON.parse(retry.stdout);
+      if (published !== integrity) throw new Error(`Published ${spec} differs from this artifact`);
+      confirmed = true;
+      break;
+    }
+    if (!confirmed) throw new Error(`Publishing ${spec} failed; retry the same job`);
+  }
+}

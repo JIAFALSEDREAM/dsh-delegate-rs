@@ -1,0 +1,306 @@
+use clap::{CommandFactory, FromArgMatches, Parser};
+use dsh_delegate_rs::{config::Config, jobs::Jobs};
+use serde_json::json;
+use std::{path::Path, process::Command};
+
+#[derive(Parser)]
+struct Arguments {
+    #[command(flatten)]
+    config: Config,
+}
+
+fn load(path: &Path, args: &[&str]) -> anyhow::Result<Config> {
+    let matches = Arguments::command()
+        .try_get_matches_from(std::iter::once("fixture").chain(args.iter().copied()))?;
+    Config::load(
+        Some(path),
+        Arguments::from_arg_matches(&matches)?.config,
+        &matches,
+    )
+}
+
+#[test]
+fn configuration_paths_and_explicit_cli_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "timeout = 12\nmodel = 'configured'\nstate_dir = 'state'\ndsh_env_file = 'api.env'\ncodex = './bin/codex'\nreport_chars = 300\ndsh_patches = ['provider.yml']\ndsh_plugins = ['plugins/provider']\ndsh_credentials_file = 'credentials.yaml'\ndsh_credential_refs = ['FIXTURE_API_KEY']\n").unwrap();
+    let configured = load(&file, &[]).unwrap();
+    assert_eq!(configured.timeout, 12);
+    assert_eq!(configured.state_dir.unwrap(), dir.path().join("state"));
+    assert_eq!(configured.dsh_env_file.unwrap(), dir.path().join("api.env"));
+    assert_eq!(configured.codex, dir.path().join("./bin/codex"));
+    assert_eq!(configured.report_chars, 300);
+    assert_eq!(configured.dsh_patches, [dir.path().join("provider.yml")]);
+    assert_eq!(
+        configured.dsh_plugins,
+        [dir.path().join("plugins/provider")]
+    );
+    assert_eq!(
+        configured.dsh_credentials_file.unwrap(),
+        dir.path().join("credentials.yaml")
+    );
+    let overridden = load(
+        &file,
+        &[
+            "--timeout",
+            "600",
+            "--model",
+            "override",
+            "--state-dir",
+            "cli-state",
+            "--report-chars",
+            "4000",
+            "--dsh-patch",
+            "cli-provider.yml",
+            "--dsh-plugin",
+            "cli-plugin",
+            "--dsh-credentials-file",
+            "cli-credentials.yaml",
+            "--dsh-credential-ref",
+            "CLI_API_KEY",
+        ],
+    )
+    .unwrap();
+    assert_eq!(overridden.timeout, 600); // Explicit defaults must still override the file.
+    assert_eq!(overridden.model.as_deref(), Some("override"));
+    assert_eq!(overridden.state_dir.unwrap(), Path::new("cli-state"));
+    assert_eq!(overridden.report_chars, 4000);
+    assert_eq!(overridden.dsh_patches, [Path::new("cli-provider.yml")]);
+    assert_eq!(overridden.dsh_plugins, [Path::new("cli-plugin")]);
+    assert_eq!(
+        overridden.dsh_credentials_file.unwrap(),
+        Path::new("cli-credentials.yaml")
+    );
+    assert_eq!(overridden.dsh_credential_refs, ["CLI_API_KEY"]);
+}
+
+#[test]
+fn delegated_model_and_provider_defaults_and_overrides() {
+    let cli = Arguments::try_parse_from(["fixture"]).unwrap().config;
+    assert_eq!(cli.model.as_deref(), Some("deepseek-flash"));
+    assert_eq!(cli.effort, None);
+    assert_eq!(cli.provider, "deepseek-official");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "timeout = 12\n").unwrap();
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("deepseek-flash")
+    );
+    std::fs::write(
+        &file,
+        "model = 'provider-model'\nprovider = 'configured-provider'\n",
+    )
+    .unwrap();
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("provider-model")
+    );
+    assert_eq!(load(&file, &[]).unwrap().provider, "configured-provider");
+    assert_eq!(
+        load(&file, &["--provider", "cli-provider"])
+            .unwrap()
+            .provider,
+        "cli-provider"
+    );
+    assert_eq!(
+        load(&file, &["--model", "deepseek-flash"])
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("deepseek-flash")
+    );
+}
+
+#[test]
+fn provider_owned_effort_supports_explicit_cli_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "model = 'custom-model'\neffort = 'medium'\n").unwrap();
+    assert_eq!(load(&file, &[]).unwrap().effort.as_deref(), Some("medium"));
+    let overridden = load(&file, &["--effort", "high"]).unwrap();
+    assert_eq!(overridden.model.as_deref(), Some("custom-model"));
+    assert_eq!(overridden.effort.as_deref(), Some("high"));
+    assert_eq!(
+        load(&file, &["--effort", "provider-fast"])
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("provider-fast")
+    );
+    std::fs::write(&file, "effort = 'provider-thinking-budget'\n").unwrap();
+    assert_eq!(
+        load(&file, &[]).unwrap().effort.as_deref(),
+        Some("provider-thinking-budget")
+    );
+    for invalid in ["", "   "] {
+        assert!(load(&file, &["--effort", invalid]).is_err());
+    }
+}
+
+#[test]
+fn initialization_never_overwrites_or_copies_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("nested/config.toml");
+    let output = Command::new(env!("CARGO_BIN_EXE_dsh-delegate-rs"))
+        .env("FIXTURE_API_KEY", "secret-that-must-not-be-copied")
+        .arg("init")
+        .arg("--config")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let contents = std::fs::read(&file).unwrap();
+    assert!(!String::from_utf8_lossy(&contents).contains("secret-that-must-not-be-copied"));
+    assert_eq!(load(&file, &[]).unwrap().retention_days, 14);
+    assert_eq!(
+        load(&file, &[]).unwrap().model.as_deref(),
+        Some("deepseek-flash")
+    );
+    assert!(Config::default().initialize(&file).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), contents);
+    assert_eq!(
+        std::fs::read_dir(file.parent().unwrap()).unwrap().count(),
+        1
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn malformed_unknown_and_out_of_range_settings_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    for input in [
+        "log_bytes = 4095",
+        "log_bytes = 32000001",
+        "profile_bytes = 999999",
+        "profile_bytes = 1000000001",
+        "timeout = 0",
+        "retention_days = 366",
+        "max_history_jobs = 9",
+        "state_dir = ''",
+        "codex = ''",
+        "provider = ''",
+        "provider = '   '",
+        "model = ''",
+        "model = '   '",
+        "effort = ''",
+        "effort = '   '",
+        "secret = 'sensitive-fixture'",
+        "model = 'sensitive-fixture",
+    ] {
+        std::fs::write(&file, input).unwrap();
+        let error = load(&file, &[]).unwrap_err().to_string();
+        assert!(!error.contains("sensitive-fixture"));
+    }
+    assert!(load(&dir.path().join("missing"), &[]).is_err());
+}
+
+#[test]
+fn wrapper_arguments_and_log_limit_use_explicit_cli_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "dsh = 'node'\ndsh_args = ['/path/to/dsh.js', '--wrapper']\nlog_bytes = 8192\n",
+    )
+    .unwrap();
+    let config = load(&path, &[]).unwrap();
+    assert_eq!(config.dsh_args, ["/path/to/dsh.js", "--wrapper"]);
+    let config = load(
+        &path,
+        &[
+            "--dsh-arg",
+            "alternate.js",
+            "--dsh-arg",
+            "--prefix",
+            "--log-bytes",
+            "4096",
+        ],
+    )
+    .unwrap();
+    assert_eq!(config.dsh_args, ["alternate.js", "--prefix"]);
+    assert_eq!(config.log_bytes, 4096);
+}
+
+#[test]
+fn cli_loads_file_before_opening_the_task_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    std::fs::write(&file, "state_dir = 'file-state'\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dsh-delegate-rs"))
+        .args(["--config"])
+        .arg(&file)
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(dir.path().join("file-state/jobs.sqlite3").exists());
+    let output = Command::new(env!("CARGO_BIN_EXE_dsh-delegate-rs"))
+        .arg("--config")
+        .arg(&file)
+        .arg("--state-dir")
+        .arg(dir.path().join("override"))
+        .arg("list")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(dir.path().join("override/jobs.sqlite3").exists());
+}
+
+#[test]
+fn legacy_job_settings_remain_readable_and_reports_are_complete() {
+    let legacy: Config = serde_json::from_value(json!({"codex":"codex","dsh":"dsh","dsh_env_file":null,"model":null,"timeout":2,"state_dir":null})).unwrap();
+    assert_eq!(legacy.max_history_jobs, 1000);
+    assert_eq!(legacy.profile_bytes, 128_000_000);
+    assert_eq!(legacy.effort, None);
+    assert_eq!(legacy.provider, "deepseek-official");
+    let state = tempfile::tempdir().unwrap();
+    let jobs = Jobs::new(Config {
+        state_dir: Some(state.path().into()),
+        report_chars: 256,
+        ..legacy
+    })
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let report = format!("{}尾部证据与不确定性🦀", "汉".repeat(5000));
+    let db = rusqlite::Connection::open(state.path().join("jobs.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO jobs VALUES(?1,?1,'succeeded',0,?2)",
+        rusqlite::params![
+            id,
+            json!({"id":id,"status":"succeeded","report":report}).to_string()
+        ],
+    )
+    .unwrap();
+    let view = jobs.get(&id).unwrap();
+    assert_eq!(view["report"], report);
+    assert_eq!(view["report_truncated"], false);
+}
+
+#[test]
+fn deprecated_report_chars_accepts_legacy_config_and_cli_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    for value in [0, 256, 4000, 6001] {
+        std::fs::write(&file, format!("report_chars = {value}\n")).unwrap();
+        assert_eq!(load(&file, &[]).unwrap().report_chars, value);
+        assert_eq!(
+            load(&file, &["--report-chars", &value.to_string()])
+                .unwrap()
+                .report_chars,
+            value
+        );
+    }
+}

@@ -1,0 +1,63 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+env:
+  RUST_BACKTRACE: '1'
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15, windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Test release tooling
+        if: runner.os == 'Linux'
+        run: |
+          python -m unittest discover -s scripts -p 'test_*.py' -v
+          node --test scripts/test-publish-npm.cjs
+      - name: Test npm launcher on the native platform
+        run: node --test scripts/test-launcher.cjs
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex@0.166.0
+      - name: Install dsh for real headless/PTC doctor probes
+        if: runner.os == 'Linux'
+        run: npm install -g @deepseek-ai/dsh@0.2.2-rc.1
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Stress concurrent task startup on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for attempt in {1..5}; do
+            cargo test --locked --test runtime concurrent_synchronous_results_survive_automatic_retention
+          done
+      - run: cargo test --locked --test sandbox native_sandbox_preserves_fixture -- --ignored
+      - name: Check real dsh headless/PTC and sandbox without a model call
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo run --locked -- --state-dir "$RUNNER_TEMP/dsh-doctor-state" doctor

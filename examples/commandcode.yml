@@ -1,0 +1,11 @@
+# Link an installed @mars-sea/dsh-commandcode-provider with --dsh-plugin.
+# Supply COMMANDCODE_API_KEY through the environment or an explicit saved ref.
+# The supervisor applies its mandatory PTC/read-only overlay after this one.
+- insert:
+    - id: llm-commandcode
+      name: '@mars-sea/dsh-commandcode-provider'
+      config:
+        apiKeyEnv: COMMANDCODE_API_KEY
+        apiBase: https://api.commandcode.ai
+        modelsCachePath: !!js dshHomePath('cache', 'commandcode', 'models-cache.json')
+        webSearch: false

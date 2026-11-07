@@ -1,0 +1,23 @@
+{
+  "name": "dsh-delegate-rs",
+  "version": "0.1.0",
+  "description": "Read-only dsh investigations through the Codex OS sandbox",
+  "license": "MIT",
+  "bin": {
+    "dsh-delegate-rs": "bin/dsh-delegate-rs.cjs"
+  },
+  "files": ["bin", "README.md", "README.en.md", "INSTALL.md", "INSTALL.en.md", "docs/dsh-contract.md", "docs/validation.md", "examples/commandcode.yml", "LICENSE"],
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "optionalDependencies": {
+    "dsh-delegate-rs-linux-x64": "0.1.0",
+    "dsh-delegate-rs-linux-arm64": "0.1.0",
+    "dsh-delegate-rs-darwin-x64": "0.1.0",
+    "dsh-delegate-rs-darwin-arm64": "0.1.0",
+    "dsh-delegate-rs-win32-x64": "0.1.0",
+    "dsh-delegate-rs-win32-arm64": "0.1.0"
+  },
+  "os": ["linux", "darwin", "win32"],
+  "cpu": ["x64", "arm64"]
+}
