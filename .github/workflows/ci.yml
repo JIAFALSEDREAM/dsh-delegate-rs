@@ -8,6 +8,24 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  macos-msrv-logs:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: '1.88.0'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Test log cleanup on the release toolchain
+        run: cargo test --locked --test logs
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15

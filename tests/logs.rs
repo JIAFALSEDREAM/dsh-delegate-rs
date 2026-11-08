@@ -196,7 +196,12 @@ print(json.dumps({{"type":"final","sessionId":"fixture-session","reason":{{"kind
         assert_eq!(result["status"], "failed");
         assert!(result["error"].as_str().unwrap().contains("log"));
         let log = Path::new(result["local_log_dir"].as_str().unwrap()).join("tmp/dsh.log");
-        assert!(fs::metadata(log).unwrap().len() <= 4096);
+        let size = fs::metadata(&log).unwrap().len();
+        assert!(
+            size <= 4096,
+            "wait={wait}, size={size}, retained={}, result={result}",
+            log.parent().unwrap().join("UNVERIFIED_PROCESS").exists()
+        );
     }
 }
 
