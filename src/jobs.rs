@@ -537,32 +537,34 @@ impl Jobs {
                 let lease = owner(&job)?;
                 if lease.try_lock_exclusive().is_ok() {
                     let mut job = Self::load(&self.db()?, id)?;
-                    if active(&job) && sandbox_alive(&job) {
-                        let pid =
-                            job["sandbox_pid"].as_u64().context("Missing sandbox PID")? as u32;
-                        let started = job["sandbox_start"]
-                            .as_u64()
-                            .context("Missing sandbox identity")?;
-                        ensure!(
-                            process_start(pid) == Some(started),
-                            "Cannot verify stopped worker's sandbox identity"
-                        );
-                        let killed = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-                        ensure!(
-                            killed == 0
-                                || std::io::Error::last_os_error().raw_os_error()
-                                    == Some(libc::ESRCH),
-                            "Cannot stop orphan sandbox"
-                        );
-                        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-                        while process_info(pid).is_some_and(|(time, status)| {
-                            time == started && status != sysinfo::ProcessStatus::Zombie
-                        }) {
+                    if active(&job) {
+                        if sandbox_alive(&job) {
+                            let pid =
+                                job["sandbox_pid"].as_u64().context("Missing sandbox PID")? as u32;
+                            let started = job["sandbox_start"]
+                                .as_u64()
+                                .context("Missing sandbox identity")?;
                             ensure!(
-                                std::time::Instant::now() < deadline,
-                                "Orphan sandbox cleanup timeout"
+                                process_start(pid) == Some(started),
+                                "Cannot verify stopped worker's sandbox identity"
                             );
-                            std::thread::sleep(Duration::from_millis(20));
+                            let killed = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                            ensure!(
+                                killed == 0
+                                    || std::io::Error::last_os_error().raw_os_error()
+                                        == Some(libc::ESRCH),
+                                "Cannot stop orphan sandbox"
+                            );
+                            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                            while process_info(pid).is_some_and(|(time, status)| {
+                                time == started && status != sysinfo::ProcessStatus::Zombie
+                            }) {
+                                ensure!(
+                                    std::time::Instant::now() < deadline,
+                                    "Orphan sandbox cleanup timeout"
+                                );
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
                         }
                         job["status"] = "cancelled".into();
                         job["progress"] = "finished".into();
@@ -1316,6 +1318,27 @@ impl Jobs {
 #[cfg(all(test, unix))]
 mod cleanup_concurrency {
     use super::*;
+    #[test]
+    fn cancellation_finishes_when_the_worker_and_sandbox_are_already_gone() {
+        let state = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Config {
+            state_dir: Some(state.path().into()),
+            ..Config::default()
+        })
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = jobs.state.join("jobs").join(&id);
+        fs::create_dir(&dir).unwrap();
+        let job = json!({"id":id,"root_id":id,"status":"running","local_log_dir":dir});
+        jobs.db()
+            .unwrap()
+            .execute(
+                "INSERT INTO jobs VALUES(?1,?1,'running',?2,?3)",
+                params![id, now(), job.to_string()],
+            )
+            .unwrap();
+        assert_eq!(jobs.cancel(&id).unwrap()["status"], "cancelled");
+    }
     #[tokio::test]
     async fn waiting_recovers_from_a_short_exclusive_database_lock() {
         let state = tempfile::tempdir().unwrap();
