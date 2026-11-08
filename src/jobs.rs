@@ -1053,7 +1053,30 @@ impl Jobs {
         loop {
             let jobs = self.clone();
             let key = id.to_owned();
-            let job = tokio::task::spawn_blocking(move || jobs.get(&key)).await??;
+            let result = tokio::task::spawn_blocking(move || jobs.get(&key)).await?;
+            let job = match result {
+                Ok(job) => job,
+                // A concurrent WAL connection or cleanup can briefly block a read.
+                // Retry asynchronously so cancellation and the wait deadline still work.
+                Err(error)
+                    if error
+                        .downcast_ref::<rusqlite::Error>()
+                        .is_some_and(|error| {
+                            matches!(
+                                error.sqlite_error_code(),
+                                Some(
+                                    rusqlite::ErrorCode::DatabaseBusy
+                                        | rusqlite::ErrorCode::DatabaseLocked
+                                )
+                            )
+                        })
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !active(&job) || tokio::time::Instant::now() >= deadline {
                 return Ok(job);
             }
@@ -1293,6 +1316,54 @@ impl Jobs {
 #[cfg(all(test, unix))]
 mod cleanup_concurrency {
     use super::*;
+    #[tokio::test]
+    async fn waiting_recovers_from_a_short_exclusive_database_lock() {
+        let state = tempfile::tempdir().unwrap();
+        let jobs = Jobs::new(Config {
+            state_dir: Some(state.path().into()),
+            ..Config::default()
+        })
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let db = jobs.db().unwrap();
+        db.execute(
+            "INSERT INTO jobs VALUES(?1,?1,'succeeded',?2,?3)",
+            params![
+                id,
+                now(),
+                json!({"id": id, "status": "succeeded"}).to_string()
+            ],
+        )
+        .unwrap();
+        drop(db);
+        let db = jobs.db().unwrap();
+        db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
+            .unwrap();
+        let start = std::time::Instant::now();
+        let error = jobs.wait(&id, 0).await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<rusqlite::Error>()
+                .unwrap()
+                .sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+        let unlock = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(350));
+            drop(db);
+        });
+        let result = jobs.wait(&id, 2).await;
+        unlock.join().unwrap();
+        assert_eq!(result.unwrap()["status"], "succeeded");
+        assert!(
+            jobs.wait("invalid-id", 2)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid job ID")
+        );
+    }
     #[test]
     fn lease_releases_the_lock_while_an_inherited_descriptor_remains_open() {
         let directory = tempfile::tempdir().unwrap();
