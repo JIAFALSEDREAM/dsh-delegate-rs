@@ -178,7 +178,7 @@ Unix worker 与沙箱组长均已退出、但仍有子进程存活且身份无�
 
 仓库为 `JIAFALSEDREAM/dsh-delegate-rs`。推送位于默认分支历史中的 `vMAJOR.MINOR.PATCH` 标签会触发 Release workflow：校验版本与仓库、构建和测试六个平台、生成归档及 `SHA256SUMS`，随后发布 GitHub Release、npm 入口及六个平台包、crates.io crate。
 
-npm 使用 Trusted Publishing（GitHub OIDC），需为入口包和六个平台包配置此仓库的 `release.yml` 发布身份；crates.io 读取仓库 secret `CARGO_REGISTRY_TOKEN`。GitHub Release 使用内置 `GITHUB_TOKEN`。这些发布身份需在对应服务中配置，不写入源码。
+npm 使用 Trusted Publishing（GitHub OIDC），需为入口包和六个平台包配置此仓库的 `release.yml` 发布身份；crates.io 同样使用 GitHub OIDC，需为 `dsh-delegate-rs` crate 配置 owner `JIAFALSEDREAM`、仓库 `dsh-delegate-rs`、workflow `release.yml`，Environment 留空，无需 `CARGO_REGISTRY_TOKEN` secret。GitHub Release 使用内置 `GITHUB_TOKEN`。这些发布身份需在对应服务中配置，不写入源码。
 
 npm 首次发布前，包尚不存在，不能配置可信发布。首发时将仓库变量 `NPM_BOOTSTRAP` 设为 `true`，Release 仍构建全部产物并发布 GitHub/crates.io，跳过 npm job；从 Release 下载并校验七个正式 `.tgz`，用已登录的 npm CLI 依次发布平台包和入口包，再通过 `npm trust github 包名 --file release.yml --repo JIAFALSEDREAM/dsh-delegate-rs --allow-publish --yes` 建立可信发布。完成后删除该变量，后续标签自动通过 OIDC 发布 npm。
 
