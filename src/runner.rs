@@ -82,19 +82,10 @@ fn stop_owned(
 ) -> Result<RawLog> {
     let stopped = (|| -> Result<()> {
         let killed = process.start_kill();
-        #[cfg(unix)]
-        let killed = killed.or_else(|error| {
-            // macOS may reject signaling an already-exited group with EPERM.
-            // Accept a failed signal only after reaping and verifying the entire group is gone.
-            if error.raw_os_error() == Some(libc::ESRCH)
-                || (matches!(process.try_wait(), Ok(Some(_))) && process_group_gone(_group_id))
-            {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        });
+        #[cfg(windows)]
         killed.context("Cannot stop owned sandbox tree")?;
+        // A failed signal can race process exit (EPERM on macOS). Keep verifying for
+        // the same bounded window; success still requires reaping and an absent group.
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let reaped = matches!(process.try_wait(), Ok(Some(_)));
@@ -106,10 +97,11 @@ fn stop_owned(
             if reaped && process_group_gone(_group_id) {
                 return Ok(());
             }
-            ensure!(
-                std::time::Instant::now() < deadline,
-                "Sandbox shutdown timeout"
-            );
+            if std::time::Instant::now() >= deadline {
+                #[cfg(unix)]
+                killed.context("Cannot stop owned sandbox tree")?;
+                anyhow::bail!("Sandbox shutdown timeout");
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
@@ -814,7 +806,7 @@ mod log_tests {
             }
         }
 
-        for state in ["running", "exited", "descendant"] {
+        for state in ["running", "exiting", "exited", "descendant"] {
             let dir = tempfile::tempdir().unwrap();
             let root =
                 Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
@@ -823,6 +815,7 @@ mod log_tests {
             let mut command = Command::new("/bin/sh");
             let script = match state {
                 "exited" => "exit 0",
+                "exiting" => "exec sleep 1",
                 "descendant" => "sleep 30 & echo $! > \"$1\"",
                 _ => "exec sleep 30",
             };
@@ -832,7 +825,7 @@ mod log_tests {
             wrapped.wrap(KillOnDrop);
             let mut process = wrapped.spawn().unwrap();
             let group = process.id();
-            if state != "running" {
+            if matches!(state, "exited" | "descendant") {
                 process.wait().await.unwrap();
             }
             let descendant = (state == "descendant").then(|| {
@@ -845,7 +838,7 @@ mod log_tests {
                 Descendant(pid)
             });
             let result = stop_owned(Box::new(DeniedKill(process)), RawLog(root, true), group);
-            if state == "exited" {
+            if matches!(state, "exiting" | "exited") {
                 assert!(
                     result.is_ok(),
                     "Finished group rejected: {:?}",
