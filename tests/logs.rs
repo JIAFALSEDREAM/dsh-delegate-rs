@@ -172,11 +172,22 @@ fn growing_and_already_completed_dsh_logs_are_bounded_and_redacted() {
     let repo = tempfile::tempdir().unwrap();
     let script = state.path().join("dsh.sh");
     for wait in [false, true] {
-        fs::write(&script, format!(r#"cat >/dev/null
-python3 -c 'import json; print(json.dumps({{"type":"session","sessionId":"fixture-session"}})); print(json.dumps({{"type":"text","text":"x"*5000}}))'
-{}
-printf '%s\n' '{{"type":"final","sessionId":"fixture-session","reason":{{"kind":"completed"}},"text":"ok"}}'
-"#, if wait {"sleep 30"} else {""})).unwrap();
+        // Keep the log writer as the group leader. Killing a shell and its sleep child
+        // together can leave an unreaped child on macOS, correctly retaining raw logs.
+        fs::write(
+            &script,
+            format!(
+                r#"cat >/dev/null
+exec python3 -u -c 'import json, time
+print(json.dumps({{"type":"session","sessionId":"fixture-session"}}))
+print(json.dumps({{"type":"text","text":"x"*5000}}))
+time.sleep({})
+print(json.dumps({{"type":"final","sessionId":"fixture-session","reason":{{"kind":"completed"}},"text":"ok"}}))'
+"#,
+                if wait { 30 } else { 0 }
+            ),
+        )
+        .unwrap();
         let start = std::time::Instant::now();
         let output = invoke(state.path(), repo.path(), &script, "inspect");
         assert!(!output.status.success());
