@@ -12,7 +12,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15-intel, macos-15]
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -25,7 +29,13 @@ jobs:
           python-version: '3.13'
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Test log cleanup on the release toolchain
-        run: cargo test --locked --test logs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo test --locked --target "$TARGET" --test logs
+          for attempt in {1..20}; do
+            cargo test --locked --target "$TARGET" --test logs growing_and_already_completed_dsh_logs_are_bounded_and_redacted
+          done
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
