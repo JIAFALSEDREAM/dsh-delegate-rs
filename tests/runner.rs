@@ -159,7 +159,13 @@ async fn every_task_pins_headless_ptc_and_model_in_a_private_overlay() {
         );
         assert_eq!(
             std::fs::read_to_string(home).unwrap(),
-            state.path().join("tmp/dsh-home").to_str().unwrap()
+            state
+                .path()
+                .join("tmp/dsh-home")
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
         );
         let prompt = std::fs::read_to_string(input).unwrap();
         assert!(prompt.contains("INHERITED_RULE"));
