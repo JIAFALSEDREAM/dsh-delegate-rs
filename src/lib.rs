@@ -10,4 +10,5 @@ pub(crate) mod prompt;
 pub(crate) mod protocol;
 pub mod redaction;
 pub mod runner;
+pub mod task;
 pub(crate) mod tree;

@@ -34,6 +34,22 @@ fn active(job: &Value) -> bool {
     )
 }
 
+fn restore_checkpoint(job: &mut Value) {
+    if !active(job)
+        && job["report"].as_str().is_none_or(|s| s.trim().is_empty())
+        && let Some(partial) = job["partial_report"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+    {
+        job["report"] = format!(
+            "Partial investigation ({}) — completion not verified.\n{partial}",
+            job["status"].as_str().unwrap_or("failed")
+        )
+        .into();
+        job["report_partial"] = true.into();
+    }
+}
+
 fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
@@ -255,6 +271,7 @@ impl Jobs {
         let mut job: Value = serde_json::from_str(&data)?;
         ensure!(job.is_object(), "Invalid job record: expected object");
         job["updated"] = updated.into();
+        restore_checkpoint(&mut job);
         Ok(Some(job))
     }
     pub fn get(&self, id: &str) -> Result<Value> {
@@ -295,6 +312,7 @@ impl Jobs {
         }
         job.as_object_mut().unwrap().remove("config");
         job.as_object_mut().unwrap().remove("task");
+        job.as_object_mut().unwrap().remove("task_options");
         job.as_object_mut().unwrap().remove("sandbox_pid");
         job.as_object_mut().unwrap().remove("sandbox_start");
         job.as_object_mut()
@@ -318,7 +336,16 @@ impl Jobs {
         Ok(())
     }
     pub fn submit(&self, task: &str, cwd: &Path, parent: Option<&str>) -> Result<Value> {
-        self.submit_using(task, cwd, parent, true, None)
+        self.submit_with_options(task, cwd, parent, &crate::task::TaskOptions::default())
+    }
+    pub fn submit_with_options(
+        &self,
+        task: &str,
+        cwd: &Path,
+        parent: Option<&str>,
+        options: &crate::task::TaskOptions,
+    ) -> Result<Value> {
+        self.submit_using(task, cwd, parent, true, None, options)
             .map(|(job, _)| job)
     }
     fn submit_using(
@@ -328,7 +355,13 @@ impl Jobs {
         parent: Option<&str>,
         detached: bool,
         abort: Option<&AtomicBool>,
+        options: &crate::task::TaskOptions,
     ) -> Result<(Value, RunCancel)> {
+        options.validate()?;
+        let mut config = self.config.clone();
+        if let Some(timeout) = options.timeout_seconds {
+            config.timeout = timeout;
+        }
         let _submission = self.submission_lease()?;
         Config::secrets(&self.config.environment()?)?;
         ensure!(
@@ -400,12 +433,12 @@ impl Jobs {
         let cwd_value = serde_json::to_value(&cwd).context("Working directory must be UTF-8")?;
         let dir_value = serde_json::to_value(&dir).context("State directory must be UTF-8")?;
         let config_value =
-            serde_json::to_value(&self.config).context("Configured paths must be UTF-8")?;
+            serde_json::to_value(&config).context("Configured paths must be UTF-8")?;
         let managed_profile = match parent {
             Some(parent) => Self::load(&tx, parent)?["managed_profile"] == true,
             None => true,
         };
-        let job = json!({"id":id,"root_id":root,"cwd":cwd_value,"status":"starting","created":now(),"updated":now(),"conversation":conversation,"progress":"queued","error":null,"exit_code":null,"local_log_dir":dir_value,"config":config_value,"task":task,"managed_profile":managed_profile});
+        let job = json!({"id":id,"root_id":root,"cwd":cwd_value,"status":"starting","created":now(),"updated":now(),"conversation":conversation,"progress":"queued","error":null,"exit_code":null,"local_log_dir":dir_value,"config":config_value,"task":task,"task_options":options,"timeout":config.timeout,"managed_profile":managed_profile});
         tx.execute(
             "INSERT INTO jobs VALUES (?1,?2,?3,?4,?5)",
             params![id, root, "starting", now(), serde_json::to_string(&job)?],
@@ -463,6 +496,14 @@ impl Jobs {
         Ok((result, submission_cancel))
     }
     pub fn followup(&self, id: &str, message: &str) -> Result<Value> {
+        self.followup_with_options(id, message, &crate::task::TaskOptions::default())
+    }
+    pub fn followup_with_options(
+        &self,
+        id: &str,
+        message: &str,
+        options: &crate::task::TaskOptions,
+    ) -> Result<Value> {
         self.get(id)?;
         let old = Self::load(&self.db()?, id)?;
         let config: Config = serde_json::from_value(old["config"].clone())?;
@@ -472,13 +513,23 @@ impl Jobs {
             job_root: self.job_root.clone(),
             profiles: self.profiles.clone(),
         };
-        original.submit(
+        original.submit_with_options(
             message,
             Path::new(old["cwd"].as_str().context("Missing cwd")?),
             Some(id),
+            options,
         )
     }
     pub async fn run(&self, task: &str, cwd: &Path) -> Result<Value> {
+        self.run_with_options(task, cwd, crate::task::TaskOptions::default())
+            .await
+    }
+    pub async fn run_with_options(
+        &self,
+        task: &str,
+        cwd: &Path,
+        options: crate::task::TaskOptions,
+    ) -> Result<Value> {
         let interrupt = tokio::signal::ctrl_c();
         tokio::pin!(interrupt);
         tokio::select! {
@@ -492,7 +543,7 @@ impl Jobs {
         let input = task.to_owned();
         let project = cwd.to_owned();
         let submission = tokio::task::spawn_blocking(move || {
-            submitter.submit_using(&input, &project, None, false, Some(&aborted))
+            submitter.submit_using(&input, &project, None, false, Some(&aborted), &options)
         });
         tokio::pin!(submission);
         let (submitted, mut owner) = tokio::select! {
@@ -522,7 +573,7 @@ impl Jobs {
                     let key = id.to_owned();
                     let full = tokio::task::spawn_blocking(move || Self::load(&reader.db()?, &key)).await??;
                     return Ok::<Value, anyhow::Error>(json!({"id":id,"status":full["status"],"response":full["report"],"error":full["error"],
-                        "exit_code":full["exit_code"],"usage":full["usage"],"usage_scope":full["usage_scope"],"usage_source":full["usage_source"],"usage_checkpoint_seq":full["usage_checkpoint_seq"],"conversation_id":full["conversation"],
+                        "exit_code":full["exit_code"],"usage":full["usage"],"usage_scope":full["usage_scope"],"usage_source":full["usage_source"],"usage_checkpoint_seq":full["usage_checkpoint_seq"],"conversation_id":full["conversation"],"report_partial":full["report_partial"],"checks":full["checks"],
                         "local_log_dir":full["local_log_dir"],"cleanup_status":full["cleanup_status"],"cleanup_warning":full["cleanup_warning"]}));
                 }
             }
@@ -1106,7 +1157,15 @@ impl Jobs {
                 .as_str()
                 .context("Missing job directory")?,
         );
-        let task = job["task"].as_str().context("Missing task")?.to_owned();
+        let options: crate::task::TaskOptions = serde_json::from_value(
+            job.get("task_options")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+        )?;
+        let task = options.prompt(
+            job["task"].as_str().context("Missing task")?,
+            config.timeout,
+        );
         let conversation = job["conversation"].as_str().map(str::to_owned);
         let profile_root = (job["managed_profile"] == true)
             .then(|| {
@@ -1167,6 +1226,22 @@ impl Jobs {
                     if let Some(kind) = event["type"].as_str() {
                         job["progress"] = event["tool"].as_str().unwrap_or(kind).into();
                     }
+                    if event["type"] == "text"
+                        && let Some(text) = event["text"].as_str()
+                        && !text.trim().is_empty()
+                    {
+                        let previous = job["partial_report"].as_str().unwrap_or("");
+                        let combined = format!("{previous}\n{text}");
+                        job["partial_report"] = combined
+                            .chars()
+                            .rev()
+                            .take(8000)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect::<String>()
+                            .into();
+                    }
                     updates.send_if_modified(|snapshot| {
                         if *snapshot == job {
                             return false;
@@ -1223,8 +1298,12 @@ impl Jobs {
                 if value["conversation_id"].is_string() {
                     job["conversation"] = value["conversation_id"].clone();
                 }
-                if value["response"].is_string() {
+                if value["response"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
                     job["report"] = value["response"].clone();
+                    job["report_partial"] = false.into();
                 }
                 if value["usage"].is_object() {
                     job["usage"] = value["usage"].clone();
@@ -1236,6 +1315,8 @@ impl Jobs {
                 job["error"] = format!("{error:#}").into();
             }
         }
+        restore_checkpoint(&mut job);
+        options.assess(&mut job);
         if let (Some(root), Some(session)) = (profile_root.as_deref(), job["conversation"].as_str())
             && let Some((usage, seq)) = self.profiles.token_usage(root, session)
         {

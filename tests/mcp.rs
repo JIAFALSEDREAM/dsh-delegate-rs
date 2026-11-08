@@ -215,14 +215,36 @@ async fn stdio_tools_preserve_failed_job_semantics() {
             matches!(name, "dsh_submit" | "dsh_followup")
         );
     }
+    for (id, options) in [
+        (20, json!({"timeout":0})),
+        (21, json!({"checks":[""]})),
+        (22, json!({"checks":"wrong type"})),
+    ] {
+        let mut args = json!({"task":"inspect","cwd":repo.path()});
+        args.as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        assert!(
+            client
+                .request(
+                    id,
+                    "tools/call",
+                    json!({"name":"dsh_submit","arguments":args})
+                )
+                .await
+                .get("error")
+                .is_some()
+        );
+    }
     let submit = client
         .request(
             3,
             "tools/call",
-            json!({"name":"dsh_submit","arguments":{"task":"inspect","cwd":repo.path()}}),
+            json!({"name":"dsh_submit","arguments":{"task":"inspect","cwd":repo.path(),"timeout":2,"checks":["Read source"]}}),
         )
         .await;
     let job = &submit["result"]["structuredContent"];
+    assert_eq!(job["timeout"], 2);
     let waited = client
         .request(
             4,

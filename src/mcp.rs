@@ -6,11 +6,13 @@ use std::path::Path;
 
 fn tools() -> Vec<Tool> {
     let string = json!({"type":"string","minLength":1});
+    let checks = json!({"type":"array","description":"Required investigation coverage. Each item needs evidence or a reason it is not applicable; missing items make a completed turn incomplete.","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":500}});
+    let budget = json!({"type":"integer","description":"Wall-clock seconds for this job. Omit to use the configured timeout; follow-ups inherit the prior job's budget.","minimum":1,"maximum":7200});
     let definitions = [
         (
             "dsh_submit",
             "Start a read-only investigation. Returns immediately; check status before using its report.",
-            json!({"cwd":string,"task":{"type":"string","minLength":1,"maxLength":24000}}),
+            json!({"cwd":string,"task":{"type":"string","minLength":1,"maxLength":24000},"timeout":budget,"checks":checks}),
             vec!["cwd", "task"],
         ),
         (
@@ -28,7 +30,7 @@ fn tools() -> Vec<Tool> {
         (
             "dsh_followup",
             "Continue a stopped task in its original dsh conversation; creates a new job.",
-            json!({"job_id":string,"message":{"type":"string","minLength":1,"maxLength":24000}}),
+            json!({"job_id":string,"message":{"type":"string","minLength":1,"maxLength":24000},"timeout":budget,"checks":checks}),
             vec!["job_id", "message"],
         ),
         (
@@ -88,6 +90,15 @@ fn validate(name: &str, args: &JsonObject) -> Result<()> {
                         <= property["maxLength"].as_u64().unwrap_or(u64::MAX) as usize,
                 "String argument outside allowed length"
             );
+        } else if property["type"] == "array" {
+            let items = value.as_array().context("Expected string array")?;
+            anyhow::ensure!(
+                items.len() <= 32
+                    && items.iter().all(|v| v
+                        .as_str()
+                        .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 500)),
+                "Provide at most 32 checks, each containing 1–500 characters"
+            );
         } else {
             let n = value
                 .as_u64()
@@ -140,11 +151,18 @@ impl ServerHandler for Jobs {
         } else {
             let jobs = self.clone();
             tokio::task::spawn_blocking(move || match name.as_str() {
-                "dsh_submit" => {
-                    jobs.submit(text(&args, "task")?, Path::new(text(&args, "cwd")?), None)
-                }
+                "dsh_submit" => jobs.submit_with_options(
+                    text(&args, "task")?,
+                    Path::new(text(&args, "cwd")?),
+                    None,
+                    &serde_json::from_value(Value::Object(args.clone()))?,
+                ),
                 "dsh_status" => jobs.get(text(&args, "job_id")?),
-                "dsh_followup" => jobs.followup(text(&args, "job_id")?, text(&args, "message")?),
+                "dsh_followup" => jobs.followup_with_options(
+                    text(&args, "job_id")?,
+                    text(&args, "message")?,
+                    &serde_json::from_value(Value::Object(args.clone()))?,
+                ),
                 "dsh_cancel" => jobs.cancel(text(&args, "job_id")?),
                 "dsh_list" => jobs.list(number(&args, "limit", 10)?),
                 _ => anyhow::bail!("Unknown tool"),

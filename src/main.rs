@@ -1,5 +1,5 @@
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use dsh_delegate_rs::{config::Config, jobs::Jobs};
+use dsh_delegate_rs::{config::Config, jobs::Jobs, task::TaskOptions};
 use std::{
     io::{Read, Write},
     path::PathBuf,
@@ -86,12 +86,16 @@ enum Action {
         cwd: PathBuf,
         #[command(flatten)]
         input: TaskInput,
+        #[command(flatten)]
+        options: TaskOptions,
     },
     Submit {
         #[arg(long)]
         cwd: PathBuf,
         #[command(flatten)]
         input: TaskInput,
+        #[command(flatten)]
+        options: TaskOptions,
     },
     Status {
         job_id: String,
@@ -107,6 +111,8 @@ enum Action {
         message: Option<String>,
         #[arg(long)]
         task_file: Option<PathBuf>,
+        #[command(flatten)]
+        options: TaskOptions,
     },
     /// Print the complete stored report or export to a new file.
     Report {
@@ -208,9 +214,11 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             anyhow::ensure!(report["ok"] == true, "Doctor checks failed");
         }
-        Action::Run { cwd, .. } => {
+        Action::Run { cwd, options, .. } => {
             let task = task.unwrap();
-            let result = Jobs::new(cli.config)?.run(&task, &cwd).await?;
+            let result = Jobs::new(cli.config)?
+                .run_with_options(&task, &cwd, options)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             anyhow::ensure!(
                 result["status"] == "succeeded",
@@ -222,12 +230,14 @@ async fn main() -> anyhow::Result<()> {
             let jobs = Jobs::new(cli.config)?;
             let value = match action {
                 Action::Cleanup { dry_run } => jobs.cleanup(dry_run)?,
-                Action::Submit { cwd, .. } => jobs.submit(task.as_deref().unwrap(), &cwd, None)?,
+                Action::Submit { cwd, options, .. } => {
+                    jobs.submit_with_options(task.as_deref().unwrap(), &cwd, None, &options)?
+                }
                 Action::Status { job_id } => jobs.get(&job_id)?,
                 Action::Wait { job_id, seconds } => jobs.wait(&job_id, seconds).await?,
-                Action::Followup { job_id, .. } => {
-                    jobs.followup(&job_id, task.as_deref().unwrap())?
-                }
+                Action::Followup {
+                    job_id, options, ..
+                } => jobs.followup_with_options(&job_id, task.as_deref().unwrap(), &options)?,
                 Action::Report { job_id, output } => {
                     let report = jobs.report(&job_id)?;
                     if let Some(path) = output {
