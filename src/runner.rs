@@ -68,6 +68,13 @@ impl Drop for OwnedChild {
         }
     }
 }
+#[cfg(unix)]
+fn process_group_gone(group_id: Option<u32>) -> bool {
+    group_id.is_some_and(|pid| {
+        (unsafe { libc::kill(-(pid as i32), 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    })
+}
 fn stop_owned(
     mut process: Box<dyn ChildWrapper>,
     mut raw_log: RawLog,
@@ -77,7 +84,11 @@ fn stop_owned(
         let killed = process.start_kill();
         #[cfg(unix)]
         let killed = killed.or_else(|error| {
-            if error.raw_os_error() == Some(libc::ESRCH) {
+            // macOS may reject signaling an already-exited group with EPERM.
+            // Accept a failed signal only after reaping and verifying the entire group is gone.
+            if error.raw_os_error() == Some(libc::ESRCH)
+                || (matches!(process.try_wait(), Ok(Some(_))) && process_group_gone(_group_id))
+            {
                 Ok(())
             } else {
                 Err(error)
@@ -92,12 +103,8 @@ fn stop_owned(
                 return Ok(());
             }
             #[cfg(unix)]
-            if let Some(pid) = _group_id {
-                let gone = unsafe { libc::kill(-(pid as i32), 0) } == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-                if gone && reaped {
-                    return Ok(());
-                }
+            if reaped && process_group_gone(_group_id) {
+                return Ok(());
             }
             ensure!(
                 std::time::Instant::now() < deadline,
@@ -780,6 +787,85 @@ pub(crate) async fn run_with_stop(
 #[cfg(test)]
 mod log_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_kill_requires_a_reaped_child_and_absent_process_group() {
+        #[derive(Debug)]
+        struct DeniedKill(Box<dyn ChildWrapper>);
+        impl ChildWrapper for DeniedKill {
+            fn inner(&self) -> &dyn ChildWrapper {
+                self.0.as_ref()
+            }
+            fn inner_mut(&mut self) -> &mut dyn ChildWrapper {
+                self.0.as_mut()
+            }
+            fn into_inner(self: Box<Self>) -> Box<dyn ChildWrapper> {
+                self.0
+            }
+            fn start_kill(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::from_raw_os_error(libc::EPERM))
+            }
+        }
+        struct Descendant(i32);
+        impl Drop for Descendant {
+            fn drop(&mut self) {
+                unsafe { libc::kill(self.0, libc::SIGKILL) };
+            }
+        }
+
+        for state in ["running", "exited", "descendant"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root =
+                Arc::new(Dir::open_ambient_dir(dir.path(), cap_std::ambient_authority()).unwrap());
+            fs::write(dir.path().join("dsh.log"), "private fixture").unwrap();
+            let pidfile = dir.path().join("descendant.pid");
+            let mut command = Command::new("/bin/sh");
+            let script = match state {
+                "exited" => "exit 0",
+                "descendant" => "sleep 30 & echo $! > \"$1\"",
+                _ => "exec sleep 30",
+            };
+            command.args(["-c", script, "fixture"]).arg(&pidfile);
+            let mut wrapped = CommandWrap::from(command);
+            wrapped.wrap(process_wrap::tokio::ProcessSession);
+            wrapped.wrap(KillOnDrop);
+            let mut process = wrapped.spawn().unwrap();
+            let group = process.id();
+            if state != "running" {
+                process.wait().await.unwrap();
+            }
+            let descendant = (state == "descendant").then(|| {
+                let pid = fs::read_to_string(&pidfile)
+                    .unwrap()
+                    .trim()
+                    .parse()
+                    .unwrap();
+                assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+                Descendant(pid)
+            });
+            let result = stop_owned(Box::new(DeniedKill(process)), RawLog(root, true), group);
+            if state == "exited" {
+                assert!(
+                    result.is_ok(),
+                    "Finished group rejected: {:?}",
+                    result.err()
+                );
+                assert!(!dir.path().join("UNVERIFIED_PROCESS").exists());
+                drop(result);
+                assert!(!dir.path().join("dsh.log").exists());
+            } else {
+                let error = result.err().expect("Live group must remain unverified");
+                assert!(format!("{error:#}").contains("termination unverified"));
+                assert!(dir.path().join("UNVERIFIED_PROCESS").is_file());
+                assert_eq!(
+                    fs::read_to_string(dir.path().join("dsh.log")).unwrap(),
+                    "private fixture"
+                );
+            }
+            drop(descendant);
+        }
+    }
 
     #[tokio::test]
     async fn successful_preparation_consumes_the_backend_deadline() {
