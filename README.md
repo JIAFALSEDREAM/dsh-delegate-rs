@@ -81,6 +81,8 @@ dsh-delegate-rs report JOB_ID --output /absolute/path/new-report.txt
 
 提交时应给出明确的调查范围和仓库绝对路径。取得结果后必须检查任务状态：失败、未完成或超时的调查不能当作已完成。详细结果通过 `dsh_status` 或 `dsh_wait` 获取。
 
+有兼容的会话投影缓存时，终态结果包含 `usage`（未缓存输入、输出、缓存读写和 `totalTokens`）、`usage_scope: conversation_cumulative`、`usage_source: session_projection_cache` 与 `usage_checkpoint_seq`。这是可能滞后的会话累计快照；追问之间不可直接求和，缓存缺失或不兼容时不填零。
+
 CLI 和 MCP 的状态、等待接口返回完整报告，`report_truncated` 固定为 `false`（有报告时）；`dsh_list` 继续只列简短状态。委派提示要求结论、证据、不确定性和简洁表达，不设报告字符上限。旧配置 `report_chars` 和参数 `--report-chars` 仅为兼容保留并忽略，不再影响报告或提示；完整报告仍存入数据库并可通过 `report` 导出。总 stdout 协议上限为 4,000,000 字节，`log_bytes` 默认也为 4,000,000 字节；超字节限制会失败，完整报告不保证无限大小。任务超时和只读沙箱继续生效。
 
 每次调查及追问都会由宿主加载 `$CODEX_HOME`（默认 `~/.codex`）的全局指令，以及从文件系统根目录到 `cwd` 的逐级目录指令。同目录优先使用 `AGENTS.override.md`，否则使用 `AGENTS.md`；独立成行的 `@文件路径` 引用会展开（支持相对路径、绝对路径和 `~/`），重复文件及循环引用只读取一次。内容连同来源路径一起注入，子代理无需重新搜索这些规则；进入新的子目录时仍需检查该目录的局部规则。指令总量上限为 64 KiB、32 个文件，读取失败或超限会明确报错。

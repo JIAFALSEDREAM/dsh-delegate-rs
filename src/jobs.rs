@@ -522,7 +522,7 @@ impl Jobs {
                     let key = id.to_owned();
                     let full = tokio::task::spawn_blocking(move || Self::load(&reader.db()?, &key)).await??;
                     return Ok::<Value, anyhow::Error>(json!({"id":id,"status":full["status"],"response":full["report"],"error":full["error"],
-                        "exit_code":full["exit_code"],"usage":full["usage"],"conversation_id":full["conversation"],
+                        "exit_code":full["exit_code"],"usage":full["usage"],"usage_scope":full["usage_scope"],"usage_source":full["usage_source"],"usage_checkpoint_seq":full["usage_checkpoint_seq"],"conversation_id":full["conversation"],
                         "local_log_dir":full["local_log_dir"],"cleanup_status":full["cleanup_status"],"cleanup_warning":full["cleanup_warning"]}));
                 }
             }
@@ -1235,6 +1235,14 @@ impl Jobs {
                 job["status"] = "failed".into();
                 job["error"] = format!("{error:#}").into();
             }
+        }
+        if let (Some(root), Some(session)) = (profile_root.as_deref(), job["conversation"].as_str())
+            && let Some((usage, seq)) = self.profiles.token_usage(root, session)
+        {
+            job["usage"] = usage;
+            job["usage_scope"] = "conversation_cumulative".into();
+            job["usage_source"] = "session_projection_cache".into();
+            job["usage_checkpoint_seq"] = seq.into();
         }
         job["progress"] = "finished".into();
         job["cleanup_status"] = "pending".into();

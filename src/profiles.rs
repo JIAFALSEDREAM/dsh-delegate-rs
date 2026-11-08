@@ -1,6 +1,6 @@
 //! Private DSH_HOME per conversation; never import or mutate the interactive home.
 use anyhow::{Result, ensure};
-use cap_fs_ext::{DirExt, MetadataExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::fs::Dir;
 use std::{
     io,
@@ -66,6 +66,59 @@ impl Profiles {
         }
         crate::tree::remove(self.root.open_dir_nofollow(id)?)?;
         Ok(())
+    }
+
+    // Optional, versioned cache snapshot; never treat a missing counter as zero.
+    pub fn token_usage(&self, root: &str, session: &str) -> Option<(serde_json::Value, u64)> {
+        use std::io::Read;
+        self.verify_root().ok()?;
+        uuid::Uuid::parse_str(root).ok()?;
+        if session.is_empty()
+            || !session
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return None;
+        }
+        let mut dir = self.root.open_dir_nofollow(root).ok()?;
+        for part in ["storages", "session_projcache", "sessions"] {
+            dir = dir.open_dir_nofollow(part).ok()?;
+        }
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = dir.open_with(format!("{session}.json"), &options).ok()?;
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(1_048_577).read_to_end(&mut bytes).ok()?;
+        if bytes.len() > 1_048_576 {
+            return None;
+        }
+        let cache: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let row = &cache["record"]["rows"]["tokenUsage"];
+        if cache["version"] != 7 || row["ver"] != 2 {
+            return None;
+        }
+        let mut totals = serde_json::Map::new();
+        let mut sum = 0u64;
+        for key in [
+            "uncachedInputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+        ] {
+            let count = row["val"]["totals"][key].as_u64()?;
+            sum = sum.checked_add(count)?;
+            totals.insert(key.into(), count.into());
+        }
+        totals.insert("totalTokens".into(), sum.into());
+        Some((totals.into(), row["seq"].as_u64()?))
     }
 
     pub fn prepare(&self, id: &str) -> Result<Profile> {
