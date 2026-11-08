@@ -8,6 +8,17 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: '1.88.0'
+          components: clippy
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo package --locked
   check:
     strategy:
       fail-fast: false

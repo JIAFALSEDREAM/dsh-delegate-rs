@@ -167,7 +167,7 @@ impl Config {
             "Plugin and overlay paths must not be empty"
         );
         ensure!(
-            self.dsh_credentials_file.is_some() == !self.dsh_credential_refs.is_empty(),
+            self.dsh_credentials_file.is_some() != self.dsh_credential_refs.is_empty(),
             "dsh_credentials_file and dsh_credential_refs must be configured together"
         );
         for name in &self.dsh_credential_refs {
