@@ -191,6 +191,8 @@ The repository is `JIAFALSEDREAM/dsh-delegate-rs`. Pushing a `vMAJOR.MINOR.PATCH
 
 npm uses Trusted Publishing (GitHub OIDC); configure the entry and six platform packages to trust this repository's `release.yml`. crates.io uses the repository secret `CARGO_REGISTRY_TOKEN`. GitHub Release uses the built-in `GITHUB_TOKEN`. Configure these identities in the relevant services; keep credentials out of source.
 
+Trusted publishing requires an existing npm package. For the first release, set repository variable `NPM_BOOTSTRAP` to `true`: Release still builds all artifacts and publishes GitHub/crates.io, skipping the npm job. Download and verify the seven official `.tgz` archives, publish the platform packages followed by the entry package using a logged-in npm CLI, then configure each with `npm trust github PACKAGE --file release.yml --repo JIAFALSEDREAM/dsh-delegate-rs --allow-publish --yes`. Delete the variable afterward so later tags publish npm automatically through OIDC.
+
 Version preparation changes only this package's Cargo/npm versions, without dependency changes or commits. Validation rejects mismatched repository metadata and stable tags outside default-branch history. Scripts reject unrelated dirty files; published artifacts are reused only after integrity checks. Publication across channels is not atomic.
 
 Local checks without publication:
