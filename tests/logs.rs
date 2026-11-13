@@ -46,7 +46,7 @@ fn dropped_runner_stops_backend_and_disposes_or_marks_its_raw_log() {
     let repo = tempfile::tempdir().unwrap();
     let script = state.path().join("dsh.sh");
     let pidfile = state.path().join("pid");
-    fs::write(&script, format!("cat >/dev/null\necho $$ > '{}'\nprintf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"fixture-session\"}}'\nwhile :; do printf '%s\\n' '{{\"type\":\"text\",\"text\":\"private-fixture-value\"}}'; sleep 0.01; done\n",pidfile.display())).unwrap();
+    fs::write(&script, format!("cat >/dev/null\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nprintf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"fixture-session\"}}'\nwhile :; do printf '%s\\n' '{{\"type\":\"text\",\"text\":\"private-fixture-value\"}}'; sleep 0.01; done\n",pid=pidfile.display())).unwrap();
     let config = dsh_delegate_rs::config::Config {
         codex: backend(state.path()),
         dsh: "/bin/sh".into(),
@@ -120,7 +120,7 @@ fn worker_database_failure_stops_sandbox_and_disposes_raw_log() {
     let repo = tempfile::tempdir().unwrap();
     let script = state.path().join("dsh.sh");
     let pidfile = state.path().join("pid");
-    fs::write(&script, format!("cat >/dev/null\nprintf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"fixture-session\"}}'\nprintf '{{\"type\":\"text\",\"text\":\"%s\"}}\\n' \"$FIXTURE_SECRET\"\necho $$ > '{}'\nexec sleep 30\n", pidfile.display())).unwrap();
+    fs::write(&script, format!("cat >/dev/null\nprintf '%s\\n' '{{\"type\":\"session\",\"sessionId\":\"fixture-session\"}}'\nprintf '{{\"type\":\"text\",\"text\":\"%s\"}}\\n' \"$FIXTURE_SECRET\"\necho $$ > '{pid}.tmp'\nmv '{pid}.tmp' '{pid}'\nexec sleep 30\n", pid=pidfile.display())).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_dsh-delegate-rs"))
         .arg("--state-dir")
         .arg(state.path())
