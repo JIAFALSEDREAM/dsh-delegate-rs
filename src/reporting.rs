@@ -1,7 +1,24 @@
 //! Signal the live dsh agent to report before the supervisor's final deadline.
 use anyhow::Result;
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, File, OpenOptions};
 use serde_json::json;
 use std::{fs, path::Path, time::Duration};
+
+pub(crate) fn signal(root: &Dir) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        // Retain this handle until the sandbox stops: deny deletion and other writers.
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    Ok(root.open_with("report.request", &options)?)
+}
 
 pub(crate) fn grace(timeout: u64) -> Duration {
     Duration::from_secs(timeout.min(60))

@@ -35,6 +35,7 @@ pub fn detach(command: &mut Command) {
 struct OwnedChild {
     process: Option<Box<dyn ChildWrapper>>,
     raw_log: Option<RawLog>,
+    reporting_guard: Option<cap_std::fs::File>,
     group_id: Option<u32>,
 }
 impl OwnedChild {
@@ -44,8 +45,10 @@ impl OwnedChild {
     async fn stop(&mut self) -> Result<RawLog> {
         let process = self.process.take().context("Missing sandbox process")?;
         let raw_log = self.raw_log.take().context("Missing raw log ownership")?;
+        let reporting_guard = self.reporting_guard.take();
         let group_id = self.group_id;
-        tokio::task::spawn_blocking(move || stop_owned(process, raw_log, group_id)).await?
+        tokio::task::spawn_blocking(move || stop_owned(process, raw_log, group_id, reporting_guard))
+            .await?
     }
 }
 impl Drop for OwnedChild {
@@ -55,10 +58,11 @@ impl Drop for OwnedChild {
         };
         let _ = process.start_kill();
         if let Some(raw_log) = self.raw_log.take() {
+            let reporting_guard = self.reporting_guard.take();
             let group_id = self.group_id;
             let cleanup = move || {
                 // Blocking tasks survive async cancellation and are joined at runtime shutdown.
-                let _ = stop_owned(process, raw_log, group_id);
+                let _ = stop_owned(process, raw_log, group_id, reporting_guard);
             };
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn_blocking(cleanup);
@@ -79,6 +83,7 @@ fn stop_owned(
     mut process: Box<dyn ChildWrapper>,
     mut raw_log: RawLog,
     _group_id: Option<u32>,
+    _reporting_guard: Option<cap_std::fs::File>,
 ) -> Result<RawLog> {
     let stopped = (|| -> Result<()> {
         let killed = process.start_kill();
@@ -498,6 +503,10 @@ pub(crate) async fn run_with_stop(
     let reporting_grace = crate::reporting::grace(config.timeout);
     let reporting_signal = dir.join("report.request");
     let reporting_root = Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
+    let mut reporting_file = crate::reporting::signal(&reporting_root)?;
+    // Cleanup owns a duplicate so cancellation cannot release Windows sharing
+    // restrictions while the blocking task is still stopping sandbox processes.
+    let reporting_guard = reporting_file.try_clone()?;
     let reporting_patch = crate::reporting::install(dir, &reporting_signal, reporting_grace)?;
     cmd.arg(config.executable(&config.dsh, &environment, &cwd))
         .args(&config.dsh_args)
@@ -542,6 +551,7 @@ pub(crate) async fn run_with_stop(
         group_id: process.id(),
         process: Some(process),
         raw_log: Some(raw_log),
+        reporting_guard: Some(reporting_guard),
     };
     let mut stdout = BufReader::new(
         child
@@ -669,12 +679,8 @@ pub(crate) async fn run_with_stop(
     // The pinned job directory is readable but not writable by sandbox tools.
     let reporting_trigger = async {
         tokio::time::sleep_until(deadline.0).await;
-        let mut options = cap_std::fs::OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        reporting_root.open_with("report.request", &options)?;
+        use std::io::Write;
+        reporting_file.write_all(b"report")?;
         Ok::<(), anyhow::Error>(())
     };
     let log_guard = async {
@@ -729,6 +735,7 @@ pub(crate) async fn run_with_stop(
     };
     drop(event_log);
     let stopped = child.stop().await;
+    drop(reporting_file);
     // Join even on a failed stop. A cancelled blocking scan must not outlive worker ownership.
     if let Some(scan) = profile_scan.take() {
         let _ = scan.await;
@@ -873,7 +880,12 @@ mod log_tests {
                 assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
                 Descendant(pid)
             });
-            let result = stop_owned(Box::new(DeniedKill(process)), RawLog(root, true), group);
+            let result = stop_owned(
+                Box::new(DeniedKill(process)),
+                RawLog(root, true),
+                group,
+                None,
+            );
             if matches!(state, "exiting" | "exited") {
                 assert!(
                     result.is_ok(),

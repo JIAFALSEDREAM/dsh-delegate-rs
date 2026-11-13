@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export const name = "delegate-reporting";
@@ -12,7 +12,7 @@ export function apply(ctx, config) {
   };
   ctx.on("agent/created", ({ agent }) => {
     const timer = setInterval(() => {
-      if (agent.status !== "running" || !existsSync(config.signal)) return;
+      if (agent.status !== "running" || readFileSync(config.signal, "utf8") !== "report") return;
       clear(agent);
       // Steering is delivered at the next step boundary without aborting active tools.
       // Do not wake an idle agent: its report may already be complete.

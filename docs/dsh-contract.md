@@ -21,7 +21,7 @@ Overlay 为顶层 YAML 数组，支持按 `id` 修改 row 和通过 `insert` 插
 
 ## 调查预算与收尾通知
 
-headless 的 stdin 一次性读到 EOF，不支持运行中追加消息。受管插件 `src/reporting.mjs` 监听 `agent/created`，在 supervisor 到达调查预算、创建信号文件后，对仍在运行的 agent 调用 `agent.steer`，把收尾消息送到下一步边界；不启动新会话，也不打断活动工具。信号位于沙箱只读的任务目录，由独立于进度回调的定时逻辑通过固定目录句柄创建。空闲 agent 不会被唤醒。消息包含稳定 ID、user role 和 `delegate-budget` 来源。
+headless 的 stdin 一次性读到 EOF，不支持运行中追加消息。受管插件 `src/reporting.mjs` 监听 `agent/created`，在 supervisor 到达调查预算、写入信号后，对仍在运行的 agent 调用 `agent.steer`，把收尾消息送到下一步边界；不启动新会话，也不打断活动工具。信号位于沙箱只读的任务目录，启动前通过固定目录句柄预先创建，到期由独立于进度回调的定时逻辑写入；Windows 持有仅共享读取的句柄，直到沙箱停止才释放，禁止其他进程写入或删除。空闲 agent 不会被唤醒。消息包含稳定 ID、user role 和 `delegate-budget` 来源。
 
 supervisor 在调查预算后继续读取协议、保存检查点，额外允许 `min(timeout, 60)` 秒收尾；结束后仍按原有 final/退出码/checks 判定。收尾窗口耗尽才返回 `timed_out`，取消和资源限额不延后。实现见 `src/reporting.rs`、`src/runner.rs`；升级 dsh 时须复核 `agent/created` / `agent/disposed` 和 `agent.steer` 的消息结构及边界语义。
 

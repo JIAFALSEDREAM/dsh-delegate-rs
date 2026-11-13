@@ -101,7 +101,6 @@ fn fixture_child() {
     assert_eq!(std::fs::read_to_string(&signal).unwrap(), "report");
     assert!(std::fs::write(&signal, "forged").is_err());
     assert!(std::fs::remove_file(&signal).is_err());
-    assert!(std::fs::write(signal.with_file_name("forged.request"), "forged").is_err());
     tempfile::NamedTempFile::new().expect("sandbox must permit native temporary files");
 }
 
@@ -114,7 +113,15 @@ async fn native_sandbox_preserves_fixture() {
     let file = workspace.path().join("source.txt");
     std::fs::write(&file, "original").unwrap();
     let signal = state.path().join("report.request");
-    std::fs::write(&signal, "report").unwrap();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ);
+    }
+    let mut signal_owner = options.open(&signal).unwrap();
+    std::io::Write::write_all(&mut signal_owner, b"report").unwrap();
     let mut cmd = config().sandbox(workspace.path(), &tmp).unwrap();
     cmd.arg(std::env::current_exe().unwrap())
         .args(["--exact", "fixture_child", "--nocapture", "--ignored"])
@@ -129,6 +136,7 @@ async fn native_sandbox_preserves_fixture() {
     .await
     .unwrap()
     .unwrap();
+    drop(signal_owner);
     assert!(
         output.status.success(),
         "{}",

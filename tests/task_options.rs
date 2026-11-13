@@ -102,7 +102,7 @@ fn reporting_preserves_late_checkpoints_and_still_enforces_required_checks() {
         let script = fixture(
             state.path(),
             &format!(
-                "while [ ! -f \"$TMPDIR/../report.request\" ]; do sleep 0.02; done\nprintf '%s\\n' '{{\"type\":\"text\",\"text\":\"Late checkpoint src/a.rs:12\"}}' '{final_event}'"
+                "while [ \"$(cat \"$TMPDIR/../report.request\")\" != report ]; do sleep 0.02; done\nprintf '%s\\n' '{{\"type\":\"text\",\"text\":\"Late checkpoint src/a.rs:12\"}}' '{final_event}'"
             ),
         );
         let job = result(
