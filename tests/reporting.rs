@@ -16,6 +16,7 @@ async fn reporting(mode: &str) -> (Value, Vec<Value>) {
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const mode = process.argv[2];
+if (mode === 'delayed-start') await new Promise(resolve => setTimeout(resolve, 3000));
 const args = process.argv.slice(3);
 await new Promise(resolve => { process.stdin.resume(); process.stdin.on('end', resolve); });
 const patches = args.flatMap((arg, i) => arg === '--patch' ? [args[i + 1]] : []);
@@ -25,7 +26,6 @@ if (!row) throw new Error('Missing reporting plugin');
 const plugin = await import(pathToFileURL(row.name));
 const handlers = new Map();
 const emit = event => console.log(JSON.stringify(event));
-const started = Date.now();
 // A tool-writable lookalike must neither trigger an early notice nor break the deadline.
 fs.writeFileSync(`${process.env.TMPDIR}/report.request`, 'forged');
 let notices = 0;
@@ -34,11 +34,10 @@ const agent = {
   steer(message) {
     if (message.role !== 'user' || !message.id || !message.content[0].text.includes('budget'))
       throw new Error('Invalid model-facing budget notification');
-    if (mode === 'slow-consumer' && Date.now() - started > 2500)
-      throw new Error('Progress consumer delayed the budget notification');
+    fs.writeFileSync(`${process.env.TMPDIR}/budget-noticed`, 'received');
     notices++;
     emit({ type: 'text', text: 'Checkpoint after budget notification' });
-    if (mode === 'success' || mode === 'slow-consumer') {
+    if (mode === 'success' || mode === 'delayed-start' || mode === 'slow-consumer') {
       emit({ type: 'final', sessionId: 'fixture', reason: { kind: 'completed' }, text: 'Report after notification' });
       process.exit(notices === 1 ? 0 : 1);
     }
@@ -55,13 +54,14 @@ setInterval(() => {}, 1000);
         codex: common::backend(state.path()),
         dsh: "node".into(),
         dsh_args: vec![script.to_string_lossy().into_owned(), mode.into()],
-        timeout: if mode == "slow-consumer" { 2 } else { 1 },
+        // Include headroom for process/Node startup on slower native CI runners.
+        timeout: 5,
         ..Config::default()
     };
     let mut events = Vec::new();
     let started = Instant::now();
     let result = tokio::time::timeout(
-        Duration::from_secs(6),
+        Duration::from_secs(15),
         runner::run(
             &config,
             repo.path(),
@@ -70,7 +70,11 @@ setInterval(() => {}, 1000);
             state.path(),
             async |event| {
                 if mode == "slow-consumer" && event["type"] == "session" {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    // Keep the consumer blocked until the real plugin receives
+                    // the notice. Delivery must not depend on this callback returning.
+                    while !state.path().join("tmp/budget-noticed").exists() {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
                 }
                 if mode == "cancel" && event["type"] == "text" {
                     std::fs::write(state.path().join("cancel"), "")?;
@@ -84,7 +88,7 @@ setInterval(() => {}, 1000);
     .unwrap()
     .unwrap();
     if result["status"] == "succeeded" {
-        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert!(started.elapsed() >= Duration::from_secs(config.timeout));
     }
     (result, events)
 }
@@ -104,6 +108,13 @@ async fn budget_notification_allows_the_running_model_to_finish_its_report() {
 #[tokio::test]
 async fn slow_progress_consumer_does_not_delay_the_model_notification() {
     let (result, _) = reporting("slow-consumer").await;
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["response"], "Report after notification");
+}
+
+#[tokio::test]
+async fn budget_notification_survives_slow_backend_startup() {
+    let (result, _) = reporting("delayed-start").await;
     assert_eq!(result["status"], "succeeded", "{result}");
     assert_eq!(result["response"], "Report after notification");
 }
