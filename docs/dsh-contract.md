@@ -8,16 +8,22 @@
 
 ```text
 dsh [dsh_args] --profile headless
-    [--patch provider.yml ...] --patch managed.yml
+    [--patch provider.yml ...] --patch managed.yml --patch reporting.yml
     --json --permission-mode read-only --approval-policy never
     [--session-id session-<uuid>] -
 ```
 
-`dsh_args` 用于 Node wrapper 等启动前参数；`dsh_patches` 按配置顺序传入 provider overlays。最后的 `managed.yml` 由程序逐次生成，固定 PTC、模型路由和只读工具配置。launcher 在第一个未知参数处把剩余参数转交 headless，因此 `--profile`、`--patch` 必须位于 `--json` 等 headless 参数之前。
+`dsh_args` 用于 Node wrapper 等启动前参数；`dsh_patches` 按配置顺序传入 provider overlays。`managed.yml` 由程序逐次生成，固定 PTC、模型路由和只读工具配置；最后的 `reporting.yml` 加载受管收尾通知插件。launcher 在第一个未知参数处把剩余参数转交 headless，因此 `--profile`、`--patch` 必须位于 `--json` 等 headless 参数之前。
 
 Overlay 为顶层 YAML 数组，支持按 `id` 修改 row 和通过 `insert` 插入插件。row 的 `config` 整体替换，不做递归合并。未知 row ID 可能只产生告警，不能仅以进程启动成功证明裁剪有效。
 
 实现见 `src/runner.rs` 和 `src/harness.rs`。
+
+## 调查预算与收尾通知
+
+headless 的 stdin 一次性读到 EOF，不支持运行中追加消息。受管插件 `src/reporting.mjs` 监听 `agent/created`，在 supervisor 到达调查预算、创建信号文件后，对仍在运行的 agent 调用 `agent.steer`，把收尾消息送到下一步边界；不启动新会话，也不打断活动工具。信号位于沙箱只读的任务目录，由独立于进度回调的定时逻辑通过固定目录句柄创建。空闲 agent 不会被唤醒。消息包含稳定 ID、user role 和 `delegate-budget` 来源。
+
+supervisor 在调查预算后继续读取协议、保存检查点，额外允许 `min(timeout, 60)` 秒收尾；结束后仍按原有 final/退出码/checks 判定。收尾窗口耗尽才返回 `timed_out`，取消和资源限额不延后。实现见 `src/reporting.rs`、`src/runner.rs`；升级 dsh 时须复核 `agent/created` / `agent/disposed` 和 `agent.steer` 的消息结构及边界语义。
 
 ## PTC 与工具范围
 

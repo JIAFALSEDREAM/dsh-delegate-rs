@@ -7,7 +7,7 @@ use std::path::Path;
 fn tools() -> Vec<Tool> {
     let string = json!({"type":"string","minLength":1});
     let checks = json!({"type":"array","description":"Required investigation coverage. Each item needs evidence or a reason it is not applicable; missing items make a completed turn incomplete.","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":500}});
-    let budget = json!({"type":"integer","description":"Wall-clock seconds for this job. Omit to use the configured timeout; follow-ups inherit the prior job's budget.","minimum":1,"maximum":7200});
+    let budget = json!({"type":"integer","description":"Investigation wall-clock seconds, then a reporting reminder and up to 60 extra seconds (at most the investigation budget) to finish. Omit to use the configured timeout; follow-ups inherit the prior job's budget.","minimum":1,"maximum":7200});
     let definitions = [
         (
             "dsh_submit",

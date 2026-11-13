@@ -89,6 +89,53 @@ fn task_budget_retains_redacted_text_on_timeout_and_followup_can_override_it() {
 }
 
 #[test]
+fn reporting_preserves_late_checkpoints_and_still_enforces_required_checks() {
+    for complete in [false, true] {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let report = if complete {
+            "Report <acceptance>{\"1\":{\"status\":\"done\",\"evidence\":\"src/a.rs:12\"}}</acceptance>"
+        } else {
+            "Report without required evidence"
+        };
+        let final_event = json!({"type":"final","sessionId":"fixture","reason":{"kind":"completed"},"text":report});
+        let script = fixture(
+            state.path(),
+            &format!(
+                "while [ ! -f \"$TMPDIR/../report.request\" ]; do sleep 0.02; done\nprintf '%s\\n' '{{\"type\":\"text\",\"text\":\"Late checkpoint src/a.rs:12\"}}' '{final_event}'"
+            ),
+        );
+        let job = result(
+            command(state.path(), &script)
+                .args(["submit", "--cwd"])
+                .arg(repo.path())
+                .args([
+                    "--task",
+                    "inspect",
+                    "--task-timeout",
+                    "1",
+                    "--check",
+                    "Locate evidence",
+                ]),
+        );
+        let stopped = wait(state.path(), &script, &job["id"]);
+        assert_eq!(
+            stopped["status"],
+            if complete { "succeeded" } else { "incomplete" }
+        );
+        assert!(stopped["reporting_started"].is_number());
+        assert!(
+            stopped["partial_report"]
+                .as_str()
+                .unwrap()
+                .contains("Late checkpoint")
+        );
+        assert_eq!(stopped["report"], report);
+        assert_eq!(stopped["report_partial"], false);
+    }
+}
+
+#[test]
 fn empty_final_report_does_not_discard_a_checkpoint() {
     let state = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();

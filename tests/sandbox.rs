@@ -97,6 +97,11 @@ fn fixture_child() {
         std::env::var("DSH_SANDBOX_FIXTURE").expect("sandbox must forward fixture environment");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
     assert!(std::fs::write(file, "changed").is_err());
+    let signal = std::path::PathBuf::from(std::env::var_os("DSH_REPORTING_FIXTURE").unwrap());
+    assert_eq!(std::fs::read_to_string(&signal).unwrap(), "report");
+    assert!(std::fs::write(&signal, "forged").is_err());
+    assert!(std::fs::remove_file(&signal).is_err());
+    assert!(std::fs::write(signal.with_file_name("forged.request"), "forged").is_err());
     tempfile::NamedTempFile::new().expect("sandbox must permit native temporary files");
 }
 
@@ -108,10 +113,13 @@ async fn native_sandbox_preserves_fixture() {
     let tmp = private_dir(&state.path().join("tmp")).unwrap();
     let file = workspace.path().join("source.txt");
     std::fs::write(&file, "original").unwrap();
+    let signal = state.path().join("report.request");
+    std::fs::write(&signal, "report").unwrap();
     let mut cmd = config().sandbox(workspace.path(), &tmp).unwrap();
     cmd.arg(std::env::current_exe().unwrap())
         .args(["--exact", "fixture_child", "--nocapture", "--ignored"])
         .env("DSH_SANDBOX_FIXTURE", &file)
+        .env("DSH_REPORTING_FIXTURE", &signal)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = tokio::time::timeout(

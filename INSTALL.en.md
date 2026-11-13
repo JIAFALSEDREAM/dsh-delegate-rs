@@ -75,7 +75,7 @@ Other settings:
 
 | Setting | Default | Purpose and range |
 | --- | --- | --- |
-| `timeout` | `600` | Task execution deadline, 1–7200 seconds |
+| `timeout` | `600` | Investigation budget including startup, 1–7200 seconds; then a reporting reminder and up to `min(timeout, 60)` extra seconds before stopping |
 | `report_chars` | `4000` | Deprecated and ignored, as is `--report-chars`; no report or prompt limit |
 | `retention_days` | `14` | History retention, 1–365 days |
 | `max_history_jobs` | `1000` | History count limit, 10–10000 |

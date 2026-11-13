@@ -147,6 +147,8 @@ async fn every_task_pins_headless_ptc_and_model_in_a_private_overlay() {
                 "headless",
                 "--patch",
                 patch.to_str().unwrap(),
+                "--patch",
+                state.path().join("reporting.yml").to_str().unwrap(),
                 "--json",
                 "--permission-mode",
                 "read-only",

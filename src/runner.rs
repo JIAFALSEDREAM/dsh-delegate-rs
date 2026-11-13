@@ -495,17 +495,25 @@ pub(crate) async fn run_with_stop(
         crate::harness::link_plugins(&home, &config.dsh_plugins)?;
     }
     let overlay = crate::harness::write_overlay(config, dir)?;
+    let reporting_grace = crate::reporting::grace(config.timeout);
+    let reporting_signal = dir.join("report.request");
+    let reporting_root = Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
+    let reporting_patch = crate::reporting::install(dir, &reporting_signal, reporting_grace)?;
     cmd.arg(config.executable(&config.dsh, &environment, &cwd))
         .args(&config.dsh_args)
         .args(["--profile", "headless"]);
     crate::harness::provider_patches(&mut cmd, config);
-    cmd.arg("--patch").arg(overlay).args([
-        "--json",
-        "--permission-mode",
-        "read-only",
-        "--approval-policy",
-        "never",
-    ]);
+    cmd.arg("--patch")
+        .arg(overlay)
+        .arg("--patch")
+        .arg(reporting_patch)
+        .args([
+            "--json",
+            "--permission-mode",
+            "read-only",
+            "--approval-policy",
+            "never",
+        ]);
     if let Some(id) = conversation {
         cmd.args(["--session-id", id]);
     }
@@ -612,16 +620,25 @@ pub(crate) async fn run_with_stop(
         let mut stream = crate::protocol::Stream::default();
         let mut bytes = 0;
         let mut frame = Vec::new();
+        let mut reporting = false;
         loop {
             if dir.join("cancel").exists() || stop.load(Ordering::Relaxed) {
                 return Ok(json!({"status":"cancelled"}));
             }
             tokio::select! {
+                _ = tokio::time::sleep_until(deadline.0), if !reporting => {
+                    reporting = true;
+                    if !notify(progress(json!({"event":"reporting_started"})),
+                        &dir.join("cancel"), stop).await? {
+                        return Ok(json!({"status":"cancelled"}));
+                    }
+                }
                 n = stdout.read_until(b'\n', &mut frame) => {
                     if n? == 0 && frame.is_empty() { break; }
                     bytes += frame.len(); ensure!(bytes <= 4_000_000, "dsh output exceeded 4 MB");
                     let mut event: Value = serde_json::from_slice(&frame).context("Invalid dsh event")?;
-                    ensure!(event["event"] != "sandbox_started", "Reserved internal event from dsh");
+                    ensure!(!matches!(event["event"].as_str(),
+                        Some("sandbox_started" | "reporting_started")), "Reserved internal event from dsh");
                     frame.clear();
                     if event["type"] == "tool_result" && permission_denied(&event["error"]) {
                         denied.store(true, Ordering::Relaxed);
@@ -647,6 +664,18 @@ pub(crate) async fn run_with_stop(
                 }
             }
         }
+    };
+    // Deliver the reminder even when a progress consumer or stdin write is stalled.
+    // The pinned job directory is readable but not writable by sandbox tools.
+    let reporting_trigger = async {
+        tokio::time::sleep_until(deadline.0).await;
+        let mut options = cap_std::fs::OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        reporting_root.open_with("report.request", &options)?;
+        Ok::<(), anyhow::Error>(())
     };
     let log_guard = async {
         loop {
@@ -683,13 +712,20 @@ pub(crate) async fn run_with_stop(
         std::future::pending::<Result<Value>>().await
     };
     let outcome = deadline.bound(async {
-        tokio::select! { result = outcome => result, result = log_guard => result, result = profile_guard => result }
-    }, Duration::ZERO)
+        let execution = async {
+            tokio::pin!(outcome);
+            tokio::select! {
+                result = &mut outcome => result,
+                triggered = reporting_trigger => { triggered?; outcome.await }
+            }
+        };
+        tokio::select! { result = execution => result, result = log_guard => result, result = profile_guard => result }
+    }, reporting_grace)
     .await;
     let result = match outcome {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(error),
-        Err(_) => Ok(json!({"status":"timed_out","error":"Task deadline exceeded"})),
+        Err(_) => Ok(json!({"status":"timed_out","error":"Task reporting deadline exceeded"})),
     };
     drop(event_log);
     let stopped = child.stop().await;

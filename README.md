@@ -83,7 +83,9 @@ dsh-delegate-rs report JOB_ID --output /absolute/path/new-report.txt
 
 `dsh_submit` / `dsh_followup` 支持可选 `timeout`（1–7200 秒）和 `checks`（最多 32 条，每条 1–500 字符）；CLI 的 `run` / `submit` / `followup` 对应 `--task-timeout 120 --check '核验包外收据'`，可重复 `--check`。省略预算使用现有配置；追问继承上一任务预算，清单按本次重新指定。清单要求调查者逐项提供证据或不适用理由，缺项会标为 `incomplete`；它检查调查覆盖，不独立证明证据正确。
 
-运行中保存模型已提交的文本摘要（最近 8000 字符，排除 thinking）。超时、取消或失败且无最终报告时，摘要可通过原报告接口取回，带 `report_partial: true`，状态仍保留原终态；模型尚未输出文本时没有摘要。提示要求预留最后四分之一预算用于报告，硬超时照常生效。
+`timeout` 是含启动时间的调查预算。预算到期后，程序向当前会话发送收尾消息，要求停止新增调查、用已有证据写报告，并将 `progress` 标为 `reporting`；消息在模型下一步边界生效，不中断正在执行的工具。随后额外给予 `min(timeout, 60)` 秒收尾时间，期间继续接收检查点和最终报告；正常完成仍按报告与检查清单判定，收尾窗口结束仍未完成才标为 `timed_out` 并停止进程。取消和资源限额继续立即生效。
+
+运行中保存模型已提交的文本摘要（最近 8000 字符，排除 thinking）。超时、取消或失败且无最终报告时，摘要可通过原报告接口取回，带 `report_partial: true`，状态仍保留原终态；模型尚未输出文本时没有摘要。
 
 有兼容的会话投影缓存时，终态结果包含 `usage`（未缓存输入、输出、缓存读写和 `totalTokens`）、`usage_scope: conversation_cumulative`、`usage_source: session_projection_cache` 与 `usage_checkpoint_seq`。这是可能滞后的会话累计快照；追问之间不可直接求和，缓存缺失或不兼容时不填零。
 

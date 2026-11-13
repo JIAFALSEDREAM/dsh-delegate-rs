@@ -71,7 +71,7 @@ max_history_jobs = 1000
 
 `effort` 为可选非空字符串，必须由实际 provider/模型支持；不同 provider 没有统一等级集合。显式值写入同一 row 的 `reasoningEffort`；省略时由 provider/会话默认决定，同 route 续聊可能保留既有 effort，需要固定时显式配置。
 
-`timeout` 为任务执行期限，范围 1–7200 秒；`report_chars` 和 `--report-chars` 仅为兼容旧调用保留并忽略，不再限制报告长度或委派提示；`retention_days` 范围 1–365；`max_history_jobs` 范围 10–10000。后两项用于手动清理和 worker 保存任务结果后的自动清理。`dsh_args` 放在托管的 dsh 参数之前，例如 `dsh = "node"` 配合 `dsh_args = ["/absolute/path/dsh.js"]`；也可重复传入 `--dsh-arg`。参数中不要放凭据。`log_bytes` 范围 4096–32000000，限制单个 `dsh.log` 及保留的 stderr；总 stdout 协议输出仍有独立的 4,000,000 字节上限；超字节限制会失败，不按字符裁剪报告。`profile_bytes` 范围 1000000–1000000000，默认 128000000 字节，限制每个独立会话目录内的文件总大小，也可在子命令前传 `--profile-bytes`。
+`timeout` 为含启动时间的调查预算，范围 1–7200 秒；到期发送收尾消息，再给予 `min(timeout, 60)` 秒写报告，之后仍未完成才硬截止。`report_chars` 和 `--report-chars` 仅为兼容旧调用保留并忽略，不再限制报告长度或委派提示；`retention_days` 范围 1–365；`max_history_jobs` 范围 10–10000。后两项用于手动清理和 worker 保存任务结果后的自动清理。`dsh_args` 放在托管的 dsh 参数之前，例如 `dsh = "node"` 配合 `dsh_args = ["/absolute/path/dsh.js"]`；也可重复传入 `--dsh-arg`。参数中不要放凭据。`log_bytes` 范围 4096–32000000，限制单个 `dsh.log` 及保留的 stderr；总 stdout 协议输出仍有独立的 4,000,000 字节上限；超字节限制会失败，不按字符裁剪报告。`profile_bytes` 范围 1000000–1000000000，默认 128000000 字节，限制每个独立会话目录内的文件总大小，也可在子命令前传 `--profile-bytes`。
 
 默认路由从 `DEEPSEEK_API_KEY` 读取 API 密钥；可在进程启动环境设置，或显式引用已有环境文件：
 

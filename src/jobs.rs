@@ -1223,7 +1223,13 @@ impl Jobs {
                             .and_then(|p| process_start(p as u32))
                             .into();
                     }
-                    if let Some(kind) = event["type"].as_str() {
+                    if event["event"] == "reporting_started" {
+                        job["progress"] = "reporting".into();
+                        job["reporting_started"] = now().into();
+                    }
+                    if let Some(kind) = event["type"].as_str()
+                        && job["reporting_started"].is_null()
+                    {
                         job["progress"] = event["tool"].as_str().unwrap_or(kind).into();
                     }
                     if event["type"] == "text"

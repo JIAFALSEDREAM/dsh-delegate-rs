@@ -46,6 +46,7 @@ pub struct Config {
     /// Optional provider-owned reasoning effort (for example high or off).
     #[arg(long)]
     pub effort: Option<String>,
+    /// Investigation budget, followed by up to min(timeout, 60) seconds to report.
     #[arg(long, global = true, default_value_t = 600, value_parser = clap::value_parser!(u64).range(1..=7200))]
     pub timeout: u64,
     #[arg(long)]

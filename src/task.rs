@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 #[derive(Args, Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TaskOptions {
-    /// Override this task's timeout in seconds (1–7200).
+    /// Investigation budget in seconds (1–7200), followed by up to 60s to report.
     #[arg(long = "task-timeout")]
     #[serde(rename = "timeout")]
     pub timeout_seconds: Option<u64>,
@@ -34,11 +34,13 @@ impl TaskOptions {
 
     pub(crate) fn prompt(&self, task: &str, timeout: u64) -> String {
         let mut text = format!(
-            "Task wall-clock budget: {timeout} seconds, including startup. Reserve the final quarter \
-             for reporting; stop investigation when evidence is sufficient. After discovery and \
+            "Investigation wall-clock budget: {timeout} seconds, including startup. At the budget \
+             boundary you will receive a message to stop investigating and write the final report \
+             within {} seconds. Stop investigation earlier when evidence is sufficient. After discovery and \
              verification, emit a short text checkpoint with findings, source references and remaining \
              gaps before more tool calls. Checkpoints are retained on timeout/cancellation; do not \
-             include private reasoning.\n\nTask:\n{task}"
+             include private reasoning.\n\nTask:\n{task}",
+            crate::reporting::grace(timeout).as_secs()
         );
         if !self.checks.is_empty() {
             text.push_str("\n\nRequired investigation checks (all must be accounted for):\n");

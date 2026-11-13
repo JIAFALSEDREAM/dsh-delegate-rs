@@ -9,6 +9,7 @@ pub(crate) mod profiles;
 pub(crate) mod prompt;
 pub(crate) mod protocol;
 pub mod redaction;
+pub(crate) mod reporting;
 pub mod runner;
 pub mod task;
 pub(crate) mod tree;
